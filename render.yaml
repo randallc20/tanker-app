@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tanker-app
+    runtime: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    pullRequestPreviewsEnabled: false
