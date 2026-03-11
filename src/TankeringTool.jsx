@@ -496,6 +496,13 @@ function ResultsPanel({ res, inp, sym }) {
   );
 }
 
+// ─── LAYOUT HELPERS ──────────────────────────────────────────────────────────
+function Row2({ children }) {
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{children}</div>
+  );
+}
+
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function TankeringTool() {
   const [inp, setInp] = useState({ ...DEFAULTS });
@@ -542,10 +549,6 @@ export default function TankeringTool() {
 
   const sym  = CURRENCY_SYMBOLS[inp.currency] || '$';
   const unit = inp.fuelUnit;
-
-  const Row2 = ({ children }) => (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{children}</div>
-  );
 
   return (
     <>
