@@ -78,15 +78,32 @@ const CRUISE_SPEEDS = {
 
 // ─── WIND SCENARIOS ──────────────────────────────────────────────────────────
 const WIND_SCENARIOS = [
-  { value: 'calm',        label: 'Calm / Variable',   kt: 0 },
-  { value: 'light_tail',  label: 'Light Tailwind',    kt: -15 },
-  { value: 'mod_tail',    label: 'Moderate Tailwind',  kt: -30 },
-  { value: 'strong_tail', label: 'Strong Tailwind',   kt: -50 },
-  { value: 'light_head',  label: 'Light Headwind',    kt: 15 },
-  { value: 'mod_head',    label: 'Moderate Headwind',  kt: 30 },
-  { value: 'strong_head', label: 'Strong Headwind',   kt: 50 },
-  { value: 'severe_head', label: 'Severe Headwind',   kt: 80 },
+  { value: 'extreme_tail', label: 'Extreme Tailwind',  kt: -100 },
+  { value: 'strong_tail',  label: 'Strong Tailwind',   kt: -50 },
+  { value: 'mod_tail',     label: 'Moderate Tailwind',  kt: -30 },
+  { value: 'light_tail',   label: 'Light Tailwind',    kt: -15 },
+  { value: 'calm',         label: 'Calm / Variable',   kt: 0 },
+  { value: 'light_head',   label: 'Light Headwind',    kt: 15 },
+  { value: 'mod_head',     label: 'Moderate Headwind',  kt: 30 },
+  { value: 'strong_head',  label: 'Strong Headwind',   kt: 50 },
+  { value: 'severe_head',  label: 'Severe Headwind',   kt: 80 },
+  { value: 'extreme_head', label: 'Extreme Headwind',  kt: 100 },
 ];
+
+// ─── ALTITUDE FUEL ADJUSTMENT ───────────────────────────────────────────────
+// Optimal cruise altitude by aircraft type (FL = hundreds of feet)
+const OPTIMAL_ALTITUDE = {
+  narrow: 350, wide: 370, bizjet: 410, turboprop: 250, helicopter: 50, custom: 350, '': 350,
+};
+
+// Fuel burn correction factor based on deviation from optimal altitude
+function altitudeFuelFactor(flightLevel, aircraftType) {
+  if (!flightLevel || flightLevel <= 0) return 1;
+  const optimal = OPTIMAL_ALTITUDE[aircraftType] || 350;
+  const deviation = Math.abs(flightLevel - optimal);
+  // ~2% increase per 100 FL deviation from optimal
+  return 1 + 0.0002 * deviation;
+}
 
 function getWindKt(scenario) {
   return WIND_SCENARIOS.find(w => w.value === scenario)?.kt || 0;
@@ -102,18 +119,18 @@ function createLeg(departure = '') {
     flightHours: '',
     flightMinutes: '',
     windScenario: 'calm',
+    cruiseFL: '',
     tripFuel: '',
     priceDep: '',
     priceDest: '',
-    upliftDep: '',
-    upliftDest: '',
+    fboSurchargeDep: '',
+    fboSurchargeDest: '',
     minPurchaseReq: '',
     rampFee: '',
     altRequired: true,
     altFuel: '',
-    intlFlight: true,
-    contingencyPct: 5,
-    taxDiffPct: 0,
+    contingencyPct: '',
+    taxDiffPct: '',
   };
 }
 
@@ -187,8 +204,8 @@ function runCalc(shared, leg) {
 
   const tripEff  = tripFuel * (1 + contPct);
   const taxMult  = 1 + n(leg.taxDiffPct) / 100;
-  const pDep     = n(leg.priceDep) + n(leg.upliftDep);
-  const pDest    = (n(leg.priceDest) + n(leg.upliftDest)) * taxMult;
+  const pDep     = n(leg.priceDep) + n(leg.fboSurchargeDep);
+  const pDest    = (n(leg.priceDest) + n(leg.fboSurchargeDest)) * taxMult;
 
   // Base takeoff weight (without tankered fuel)
   const baseTOW = zfw + tripEff + minLand + altFuel;
@@ -446,7 +463,7 @@ function haversineNM(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function calcRouteInfo(depIcao, destIcao, aircraftType, windScenario) {
+function calcRouteInfo(depIcao, destIcao, aircraftType, windScenario, cruiseFL) {
   const dep = AIRPORT_MAP[depIcao];
   const dest = AIRPORT_MAP[destIcao];
   if (!dep || !dest) return null;
@@ -456,7 +473,8 @@ function calcRouteInfo(depIcao, destIcao, aircraftType, windScenario) {
   const effectiveSpeed = Math.max(50, cruiseSpeed - windKt);
   const totalMin = Math.round((distNM / effectiveSpeed) * 60);
   const burnRate = FUEL_BURN_PER_HOUR[aircraftType];
-  const tripFuelGal = burnRate ? Math.round(burnRate * (totalMin / 60)) : null;
+  const altFactor = altitudeFuelFactor(n(cruiseFL), aircraftType);
+  const tripFuelGal = burnRate ? Math.round(burnRate * (totalMin / 60) * altFactor) : null;
   return { distance: distNM, hours: Math.floor(totalMin / 60), minutes: totalMin % 60, tripFuelGal };
 }
 
@@ -683,13 +701,12 @@ function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
     { label: 'Max Tankerable Fuel',       val: fmtU(maxTanker) },
     { label: 'Limiting Constraint',       val: limitLabels[limitingFactor] || 'MTOW', color: t.accent },
     { label: 'Recommended Tanker Amount', val: fmtU(optTanker), highlight: true },
-    { label: 'Burn Penalty (Breguet)',    val: fmtU(burnPenalty) },
+    { label: 'Extra Burn (weight penalty)', val: fmtU(burnPenalty) },
     { label: 'Gross Savings',             val: fmtC(grossSav), color: '#38d068' },
-    { label: 'Cost of Carry',             val: `\u2212${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
+    { label: 'Fuel Burn Cost',            val: `\u2212${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
     ...(payloadDisp > 0 ? [{ label: 'Payload Displacement',   val: `\u2212${sym}${fmtN(payloadDisp,2)}`, color: '#e04040' }] : []),
-    { label: 'Fee Adjustment',            val: fmtC(feeAdj), color: feeAdj >= 0 ? '#38d068' : '#e04040' },
-    { label: 'Break-Even Delta',          val: `${sym}${fmtN(breakEvenDelta,4)}/${unit}` },
-    { label: 'Actual Price Diff',         val: `${sym}${fmtN(actualDelta,4)}/${unit}`, color: actualDelta > breakEvenDelta ? '#38d068' : '#e04040' },
+    ...(feeAdj !== 0 ? [{ label: 'Fee Adjustment',            val: fmtC(feeAdj), color: feeAdj >= 0 ? '#38d068' : '#e04040' }] : []),
+    { label: 'Price Difference',          val: `${sym}${fmtN(actualDelta,4)}/${unit}`, color: actualDelta > 0 ? '#38d068' : '#e04040' },
   ];
 
   const barData = [
@@ -775,6 +792,7 @@ function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
 
 // ─── LEG CARD ────────────────────────────────────────────────────────────────
 function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveLeg, t }) {
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const unit = shared.fuelUnit;
   const sym = CURRENCY_SYMBOLS[shared.currency] || '$';
   const setL = (k, v) => onUpdateLeg(index, k, v);
@@ -816,14 +834,19 @@ function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveL
         </Field>
       </Row2>
 
-      <Field label="Est. Flight Time" t={t}>
-        <Row2>
-          <InputWithSuffix type="number" suffix="HR" min={0} max={24} value={leg.flightHours} onChange={e => setLNum('flightHours', e.target.value)} t={t} />
-          <InputWithSuffix type="number" suffix="MIN" min={0} max={59} value={leg.flightMinutes} onChange={e => setLNum('flightMinutes', e.target.value)} t={t} />
-        </Row2>
-      </Field>
+      <Row2>
+        <Field label="Cruise Altitude" tip="Flight level (e.g. 350 = FL350). Affects fuel burn — lower or higher than optimal costs more fuel." t={t}>
+          <InputWithSuffix type="number" suffix="FL" min={0} max={500} value={leg.cruiseFL} onChange={e => setLNum('cruiseFL', e.target.value)} placeholder="e.g. 350" t={t} />
+        </Field>
+        <Field label="Est. Flight Time" t={t}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <InputWithSuffix type="number" suffix="HR" min={0} max={24} value={leg.flightHours} onChange={e => setLNum('flightHours', e.target.value)} t={t} />
+            <InputWithSuffix type="number" suffix="MIN" min={0} max={59} value={leg.flightMinutes} onChange={e => setLNum('flightMinutes', e.target.value)} t={t} />
+          </div>
+        </Field>
+      </Row2>
 
-      <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors[`trip_${index}`]} t={t}>
+      <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route, aircraft & altitude. Override as needed." error={errors[`trip_${index}`]} t={t}>
         <input style={mkInputStyle(t, errors[`trip_${index}`])} type="number" value={leg.tripFuel} onChange={e => setLNum('tripFuel', e.target.value)} />
       </Field>
 
@@ -838,48 +861,60 @@ function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveL
             <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.priceDest} onChange={e => setLNum('priceDest', e.target.value)} />
           </Field>
         </Row2>
-        <Row2>
-          <Field label={`Into-Plane — Dep (${sym}/${unit})`} t={t}>
-            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.upliftDep} onChange={e => setLNum('upliftDep', e.target.value)} />
-          </Field>
-          <Field label={`Into-Plane — Dest (${sym}/${unit})`} t={t}>
-            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.upliftDest} onChange={e => setLNum('upliftDest', e.target.value)} />
-          </Field>
-        </Row2>
-        <Row2>
-          <Field label={`Min Purchase (${unit})`} t={t}>
-            <input style={mkInputStyle(t)} type="number" value={leg.minPurchaseReq} onChange={e => setLNum('minPurchaseReq', e.target.value)} />
-          </Field>
-          <Field label={`Ramp Fee (${sym})`} t={t}>
-            <input style={mkInputStyle(t)} type="number" value={leg.rampFee} onChange={e => setLNum('rampFee', e.target.value)} />
-          </Field>
-        </Row2>
       </div>
 
       {/* Regulatory per-leg */}
       <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 12 }}>
         <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>REGULATORY</div>
-        <Row2>
-          <Field label="Alternate Required?" t={t}>
-            <Toggle value={leg.altRequired ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL('altRequired', v === 'yes')} t={t} />
-          </Field>
-          <Field label="International?" t={t}>
-            <Toggle value={leg.intlFlight ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL('intlFlight', v === 'yes')} t={t} />
-          </Field>
-        </Row2>
+        <Field label="Alternate Required?" t={t}>
+          <Toggle value={leg.altRequired ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL('altRequired', v === 'yes')} t={t} />
+        </Field>
         {leg.altRequired && (
           <Field label={`Alternate Fuel (${unit})`} t={t}>
             <input style={mkInputStyle(t)} type="number" value={leg.altFuel} onChange={e => setLNum('altFuel', e.target.value)} />
           </Field>
         )}
-        <Row2>
-          <Field label="Contingency (%)" t={t}>
-            <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={leg.contingencyPct} onChange={e => setLNum('contingencyPct', e.target.value)} t={t} />
-          </Field>
-          <Field label="Tax Differential (%)" t={t}>
-            <InputWithSuffix type="number" suffix="%" min={0} max={50} step={0.5} value={leg.taxDiffPct} onChange={e => setLNum('taxDiffPct', e.target.value)} t={t} />
-          </Field>
-        </Row2>
+      </div>
+
+      {/* Advanced Options (collapsible) */}
+      <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 8 }}>
+        <button onClick={() => setShowAdvanced(!showAdvanced)} style={{
+          background: 'transparent', border: 'none', cursor: 'pointer',
+          color: t.accent, fontFamily: "'Barlow Condensed', sans-serif",
+          fontSize: 12, letterSpacing: '1.5px', textTransform: 'uppercase',
+          padding: '4px 0', display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span style={{ fontSize: 10, transition: 'transform 0.15s', transform: showAdvanced ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+          ADVANCED OPTIONS
+        </button>
+        {showAdvanced && (
+          <div style={{ marginTop: 10 }}>
+            <Row2>
+              <Field label={`FBO Surcharge — Dep (${sym}/${unit})`} tip="Fee charged by the FBO on top of fuel price (formerly into-plane fee)." t={t}>
+                <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.fboSurchargeDep} onChange={e => setLNum('fboSurchargeDep', e.target.value)} />
+              </Field>
+              <Field label={`FBO Surcharge — Dest (${sym}/${unit})`} t={t}>
+                <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.fboSurchargeDest} onChange={e => setLNum('fboSurchargeDest', e.target.value)} />
+              </Field>
+            </Row2>
+            <Row2>
+              <Field label={`Min Purchase (${unit})`} tip="Some FBOs require a minimum fuel purchase to waive ramp/parking fees. If tankering means you buy less at the destination, you may still need to meet this minimum." t={t}>
+                <input style={mkInputStyle(t)} type="number" value={leg.minPurchaseReq} onChange={e => setLNum('minPurchaseReq', e.target.value)} />
+              </Field>
+              <Field label={`Ramp Fee (${sym})`} tip="Fee waived if minimum fuel purchase is met at destination." t={t}>
+                <input style={mkInputStyle(t)} type="number" value={leg.rampFee} onChange={e => setLNum('rampFee', e.target.value)} />
+              </Field>
+            </Row2>
+            <Row2>
+              <Field label="Contingency (%)" tip="Extra fuel carried as a percentage of trip fuel for safety margin. Typical: 3-5%." t={t}>
+                <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={leg.contingencyPct} onChange={e => setLNum('contingencyPct', e.target.value)} placeholder="0" t={t} />
+              </Field>
+              <Field label="Tax Differential (%)" tip="If destination fuel is taxed differently than departure fuel, enter the percentage difference here." t={t}>
+                <InputWithSuffix type="number" suffix="%" min={0} max={50} step={0.5} value={leg.taxDiffPct} onChange={e => setLNum('taxDiffPct', e.target.value)} placeholder="0" t={t} />
+              </Field>
+            </Row2>
+          </div>
+        )}
       </div>
     </Panel>
   );
@@ -892,6 +927,7 @@ export default function TankeringTool() {
   const [errors, setErrors] = useState({});
   const [unitSys, setUnitSys] = useState('imperial');
   const [theme, setTheme] = useState('dark');
+  const [showAcAdvanced, setShowAcAdvanced] = useState(false);
   const t = THEMES[theme];
 
   const unit = state.fuelUnit;
@@ -953,7 +989,7 @@ export default function TankeringTool() {
     setState(prev => {
       let changed = false;
       const newLegs = prev.legs.map(leg => {
-        const info = calcRouteInfo(leg.departure, leg.destination, prev.aircraftType, leg.windScenario);
+        const info = calcRouteInfo(leg.departure, leg.destination, prev.aircraftType, leg.windScenario, leg.cruiseFL);
         if (!info) return leg;
         const updates = {};
         if (leg.distance !== info.distance) updates.distance = info.distance;
@@ -970,7 +1006,7 @@ export default function TankeringTool() {
       return changed ? { ...prev, legs: newLegs } : prev;
     });
   }, [
-    state.legs.map(l => `${l.departure}|${l.destination}|${l.windScenario}`).join(','),
+    state.legs.map(l => `${l.departure}|${l.destination}|${l.windScenario}|${l.cruiseFL}`).join(','),
     state.aircraftType,
   ]);
 
@@ -992,6 +1028,8 @@ export default function TankeringTool() {
           tripFuel: convert(leg.tripFuel),
           altFuel: convert(leg.altFuel),
           minPurchaseReq: convert(leg.minPurchaseReq),
+          fboSurchargeDep: leg.fboSurchargeDep,
+          fboSurchargeDest: leg.fboSurchargeDest,
         })),
       };
     });
@@ -1104,7 +1142,7 @@ export default function TankeringTool() {
               <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight — hard structural limit." error={errors.mtow} t={t}>
                 <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
               </Field>
-              <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — if tankered fuel isn't burned off, you may exceed this. Limits tankering on short sectors." t={t}>
+              <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — if tankered fuel isn't burned off, you may exceed this. Limits tankering on short legs." t={t}>
                 <input style={mkInputStyle(t)} type="number" value={state.mlw} onChange={e => setSharedNum('mlw', e.target.value)} />
               </Field>
             </Row2>
@@ -1122,22 +1160,36 @@ export default function TankeringTool() {
               <input style={mkInputStyle(t)} type="number" value={state.minLandingFuel} onChange={e => setSharedNum('minLandingFuel', e.target.value)} />
             </Field>
 
-            <Field label="Payload Displacement Rate ($/lb)" tip="Revenue lost per pound of cargo/passengers offloaded to make room for tankered fuel. Leave blank or 0 if payload is fixed." t={t}>
-              <input style={mkInputStyle(t)} type="number" step={0.01} value={state.payloadRate} onChange={e => setSharedNum('payloadRate', e.target.value)} />
-            </Field>
-
-            <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned due to carrying additional weight. 3-4% typical for jets." t={t}>
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>1%</span>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: t.accent }}>{n(state.burnPenaltyRate).toFixed(1)}%</span>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>8%</span>
+            <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 8 }}>
+              <button onClick={() => setShowAcAdvanced(!showAcAdvanced)} style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: t.accent, fontFamily: "'Barlow Condensed', sans-serif",
+                fontSize: 12, letterSpacing: '1.5px', textTransform: 'uppercase',
+                padding: '4px 0', display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <span style={{ fontSize: 10, transition: 'transform 0.15s', transform: showAcAdvanced ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+                ADVANCED
+              </button>
+              {showAcAdvanced && (
+                <div style={{ marginTop: 10 }}>
+                  <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned due to carrying additional weight. 3-4% typical for jets. Auto-set when you select an aircraft type." t={t}>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>1%</span>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: t.accent }}>{n(state.burnPenaltyRate).toFixed(1)}%</span>
+                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>8%</span>
+                      </div>
+                      <input type="range" min={1} max={8} step={0.1} value={state.burnPenaltyRate}
+                        onChange={e => setSharedNum('burnPenaltyRate', e.target.value)}
+                        style={{ width: '100%', cursor: 'pointer' }} />
+                    </div>
+                  </Field>
+                  <Field label="Payload Displacement Rate ($/lb)" tip="Revenue lost per pound of cargo/passengers offloaded to make room for tankered fuel. Leave blank or 0 if payload is fixed." t={t}>
+                    <input style={mkInputStyle(t)} type="number" step={0.01} value={state.payloadRate} onChange={e => setSharedNum('payloadRate', e.target.value)} />
+                  </Field>
                 </div>
-                <input type="range" min={1} max={8} step={0.1} value={state.burnPenaltyRate}
-                  onChange={e => setSharedNum('burnPenaltyRate', e.target.value)}
-                  style={{ width: '100%', cursor: 'pointer' }} />
-              </div>
-            </Field>
+              )}
+            </div>
           </Panel>
 
           {/* SHARED: OPERATIONS */}
