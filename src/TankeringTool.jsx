@@ -146,6 +146,11 @@ const INITIAL_STATE = {
   payloadRate: '',       // revenue per lb of displaced payload
   currency: 'USD',
   operationType: 'part121',
+  weightBreakdown: {
+    enabled: false, wbUnit: 'lbs',
+    oew: '', paxCount: '', avgPaxWt: 200,
+    checkedBags: '', carryOn: '', cargo: '', catering: '', other: '',
+  },
   legs: [createLeg('KHOU')],
 };
 
@@ -165,6 +170,13 @@ function fromLbs(val, unit) {
 
 // ─── HELPERS ────────────────────────────────────────────────────────────────
 function n(v) { return v === '' ? 0 : +v; }
+
+// Compute ZFW from weight breakdown (returns lbs)
+function computeZFWLbs(wb) {
+  const wt = (v) => wb.wbUnit === 'kg' ? n(v) * KG_TO_LBS : n(v);
+  return wt(wb.oew) + n(wb.paxCount) * wt(wb.avgPaxWt) + wt(wb.checkedBags) +
+         wt(wb.carryOn) + wt(wb.cargo) + wt(wb.catering) + wt(wb.other);
+}
 
 // ─── CALCULATION ENGINE (Breguet-based with MLW, tank capacity, payload) ─────
 
@@ -310,6 +322,24 @@ function runCalc(shared, leg) {
     });
   }
 
+  // Price comparison scenarios
+  const priceScenarios = [-30, -20, -10, 0, 10, 20, 30].map(pct => {
+    const adjDestBase = n(leg.priceDest) * (1 + pct / 100);
+    const adjPDest = (adjDestBase + n(leg.fboSurchargeDest)) * taxMult;
+    let sBestX = 0, sBestNet = 0;
+    for (let i = 0; i <= 50; i++) {
+      const xLbs = (maxTankLbs / 50) * i;
+      const bp = breguetBurnPenalty(xLbs, tripEff, baseTOW, burnRate);
+      const gross = xLbs * adjPDest;
+      const carry = bp * pDep;
+      let pd = 0;
+      if (mtow > 0 && payloadRate > 0) pd = Math.max(0, baseTOW + xLbs + bp - mtow) * payloadRate;
+      const sNet = gross - carry - pd;
+      if (sNet > sBestNet) { sBestNet = sNet; sBestX = xLbs; }
+    }
+    return { pct, destPrice: adjDestBase, optTanker: Math.round(fromLbs(sBestX, unit)), netSav: Math.round(sBestNet) };
+  });
+
   return {
     maxTanker:    fromLbs(maxTankLbs, unit),
     optTanker:    fromLbs(bestX, unit),
@@ -321,6 +351,7 @@ function runCalc(shared, leg) {
     netSav:       opt.net,
     breakEvenDelta, actualDelta,
     sensitivityData, limitingFactor,
+    priceScenarios,
   };
 }
 
@@ -338,6 +369,85 @@ function validateLeg(shared, leg, index) {
   if (!n(leg.tripFuel))                errs[`trip_${index}`] = `${pfx}Trip fuel is required`;
   else if (n(leg.tripFuel) <= 0)      errs[`trip_${index}`] = `${pfx}Trip fuel must be > 0`;
   return errs;
+}
+
+// ─── ROUND-TRIP ANALYSIS ──────────────────────────────────────────────────────
+// Analyzes tankering extra fuel on outbound for use on return leg
+function runRoundTripAnalysis(shared, outLeg, retLeg) {
+  const unit = shared.fuelUnit;
+  const pA = n(outLeg.priceDep) + n(outLeg.fboSurchargeDep);
+  const pB = n(retLeg.priceDep) + n(retLeg.fboSurchargeDep);
+  if (pA <= 0 || pB <= 0 || pA >= pB) return null; // only useful when departure is cheaper
+
+  const tripOut = toLbs(n(outLeg.tripFuel), unit);
+  const zfw = toLbs(n(shared.zfw), unit);
+  const mtow = toLbs(n(shared.mtow), unit);
+  const mlw = toLbs(n(shared.mlw), unit);
+  const maxFuelCap = toLbs(n(shared.maxFuel), unit);
+  const minLand = toLbs(n(shared.minLandingFuel), unit);
+  const burnRate = n(shared.burnPenaltyRate) / 100;
+  const altOut = outLeg.altRequired ? toLbs(n(outLeg.altFuel), unit) : 0;
+  const contOut = n(outLeg.contingencyPct) / 100;
+  const contRet = n(retLeg.contingencyPct) / 100;
+  const tripEffOut = tripOut * (1 + contOut);
+  const tripRet = toLbs(n(retLeg.tripFuel), unit);
+  const tripEffRet = tripRet * (1 + contRet);
+  const altRet = retLeg.altRequired ? toLbs(n(retLeg.altFuel), unit) : 0;
+  const returnFuelNeeded = tripEffRet + minLand + altRet;
+  const baseTOW = zfw + tripEffOut + minLand + altOut;
+
+  // Constraints on outbound
+  const mtowHead = mtow > 0 ? Math.max(0, mtow - baseTOW) : Infinity;
+  let mlwLim = Infinity;
+  if (mlw > 0) {
+    const mlwRoom = Math.max(0, mlw - (zfw + minLand + altOut));
+    let lo = 0, hi = mtowHead;
+    for (let i = 0; i < 30; i++) {
+      const mid = (lo + hi) / 2;
+      if (mid - breguetBurnPenalty(mid, tripEffOut, baseTOW, burnRate) <= mlwRoom) lo = mid; else hi = mid;
+    }
+    mlwLim = lo;
+  }
+  let fuelLim = Infinity;
+  if (maxFuelCap > 0) {
+    const fuelRoom = Math.max(0, maxFuelCap - (tripEffOut + minLand + altOut));
+    let lo = 0, hi = mtowHead;
+    for (let i = 0; i < 30; i++) {
+      const mid = (lo + hi) / 2;
+      if (mid + breguetBurnPenalty(mid, tripEffOut, baseTOW, burnRate) <= fuelRoom) lo = mid; else hi = mid;
+    }
+    fuelLim = lo;
+  }
+  const maxExtra = Math.max(0, Math.min(mtowHead, mlwLim, fuelLim));
+
+  // Optimize: tanker T extra at A, fuel arriving at B = T - BP(T), saves buying at B
+  const STEPS = 200;
+  let bestT = 0, bestNet = 0;
+  const curve = [];
+  for (let i = 0; i <= STEPS; i++) {
+    const T = (maxExtra / STEPS) * i;
+    const bp = breguetBurnPenalty(T, tripEffOut, baseTOW, burnRate);
+    const arriving = Math.max(0, T - bp);
+    const saved = Math.min(arriving, returnFuelNeeded);
+    const net = saved * pB - T * pA;
+    if (i % 10 === 0 || i === STEPS) {
+      curve.push({ tankerExtra: Math.round(fromLbs(T, unit)), netSavings: Math.round(net), fuelAtB: Math.round(fromLbs(saved, unit)) });
+    }
+    if (net > bestNet) { bestNet = net; bestT = T; }
+  }
+
+  const bestBP = breguetBurnPenalty(bestT, tripEffOut, baseTOW, burnRate);
+  const bestArriving = Math.max(0, bestT - bestBP);
+  const bestSaved = Math.min(bestArriving, returnFuelNeeded);
+  const pctOfReturn = returnFuelNeeded > 0 ? (bestSaved / returnFuelNeeded * 100) : 0;
+
+  return {
+    optExtraTanker: fromLbs(bestT, unit), netSavings: bestNet,
+    burnPenalty: fromLbs(bestBP, unit), fuelArrivingAtB: fromLbs(bestArriving, unit),
+    fuelSavedAtB: fromLbs(bestSaved, unit), returnFuelNeeded: fromLbs(returnFuelNeeded, unit),
+    pctOfReturn, maxExtra: fromLbs(maxExtra, unit), curve,
+    depIcao: outLeg.departure, turnIcao: outLeg.destination,
+  };
 }
 
 // ─── AIRPORTS DATABASE (with coordinates) ───────────────────────────────────
@@ -786,7 +896,214 @@ function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
+
+      {/* Price Comparison Table */}
+      {res.priceScenarios && n(leg.priceDest) > 0 && (
+        <div style={{ padding: '16px 20px', borderTop: `1px solid ${t.rowBorder}` }}>
+          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>
+            PRICE COMPARISON — WHAT IF DEST PRICE CHANGES?
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: `2px solid ${t.border}` }}>
+                {['SCENARIO', `DEST PRICE (${sym}/${unit})`, `OPT TANKER (${unit})`, 'NET SAVINGS'].map(h => (
+                  <th key={h} style={{ padding: '6px 10px', fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', color: t.textMuted, fontFamily: "'Barlow Condensed', sans-serif", textAlign: h === 'SCENARIO' ? 'left' : 'right' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {res.priceScenarios.map(s => (
+                <tr key={s.pct} style={{ borderBottom: `1px solid ${t.rowBorder}`, background: s.pct === 0 ? t.headerBg : 'transparent' }}>
+                  <td style={{ padding: '6px 10px', fontSize: 12, fontFamily: "'Barlow Condensed', sans-serif", color: s.pct === 0 ? t.accent : t.textSec }}>
+                    {s.pct === 0 ? 'Current' : `${s.pct > 0 ? '+' : ''}${s.pct}%`}
+                  </td>
+                  <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.text }}>{sym}{s.destPrice.toFixed(3)}</td>
+                  <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.text }}>{s.optTanker.toLocaleString()}</td>
+                  <td style={{ padding: '6px 10px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, fontWeight: s.pct === 0 ? 700 : 400, color: s.netSav > 0 ? '#38d068' : s.netSav < 0 ? '#e04040' : t.text }}>
+                    {s.netSav >= 0 ? '' : '-'}{sym}{Math.abs(s.netSav).toLocaleString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
+  );
+}
+
+// ─── ROUND-TRIP RESULTS PANEL ─────────────────────────────────────────────────
+function RoundTripResultPanel({ rtResult, sym, unit, t }) {
+  if (!rtResult) return null;
+  const rt = rtResult;
+  const fmtN = (n, d = 0) => n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
+  const fmtU = (n) => `${fmtN(n, 1)} ${unit}`;
+  const fmtC = (n, d = 2) => `${n < 0 ? '-' : ''}${sym}${fmtN(Math.abs(n), d)}`;
+
+  const rows = [
+    { label: `Extra Fuel to Tanker at ${rt.depIcao}`, val: fmtU(rt.optExtraTanker), highlight: true },
+    { label: 'Outbound Burn Penalty', val: fmtU(rt.burnPenalty) },
+    { label: `Fuel Arriving at ${rt.turnIcao}`, val: fmtU(rt.fuelArrivingAtB) },
+    { label: 'Return Fuel Covered', val: `${fmtN(rt.pctOfReturn, 0)}% of ${fmtU(rt.returnFuelNeeded)}` },
+    { label: 'Max Capacity for Extra Tanker', val: fmtU(rt.maxExtra) },
+  ];
+
+  return (
+    <div style={{ gridColumn: '1 / -1', background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+      <div style={{ background: t.headerBg, padding: '12px 20px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: t.textSec }}>
+          ROUND-TRIP ANALYSIS — {rt.depIcao} {'\u2194'} {rt.turnIcao}
+        </div>
+        <div style={{
+          background: rt.netSavings > 0 ? '#0a1e10' : '#1e0a0a',
+          border: `2px solid ${rt.netSavings > 0 ? '#28a048' : '#a02828'}`,
+          borderRadius: 3, padding: '6px 18px', display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 22, color: rt.netSavings > 0 ? '#38d068' : '#e04040' }}>{rt.netSavings > 0 ? '\u2713' : '\u2717'}</span>
+          <div>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 17, fontWeight: 700, letterSpacing: '2px', color: rt.netSavings > 0 ? '#38d068' : '#e04040' }}>
+              {rt.netSavings > 0 ? 'TANKER FOR RETURN' : 'BUY AT TURNAROUND'}
+            </div>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 10, letterSpacing: '1.5px', color: rt.netSavings > 0 ? '#28a048' : '#a02828' }}>
+              {rt.netSavings > 0 ? `SAVE ${fmtC(rt.netSavings)} BY TANKERING` : 'NOT ECONOMICAL TO TANKER FOR RETURN'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="avn-data-split" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+        <div style={{ borderRight: `1px solid ${t.border}` }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i} style={{ borderBottom: `1px solid ${t.rowBorder}` }}>
+                  <td style={{ padding: '9px 16px', fontSize: 12, fontWeight: 600, letterSpacing: '0.8px', textTransform: 'uppercase', color: t.textSec, fontFamily: "'Barlow Condensed', sans-serif", width: '56%' }}>{row.label}</td>
+                  <td style={{ padding: '9px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: row.highlight ? 14 : 13, color: row.highlight ? t.accent : t.text }}>{row.val}</td>
+                </tr>
+              ))}
+              <tr style={{ background: t.headerBg }}>
+                <td style={{ padding: '13px 16px', fontSize: 13, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.text, fontFamily: "'Barlow Condensed', sans-serif" }}>ROUND-TRIP NET SAVINGS</td>
+                <td style={{ padding: '13px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 22, fontWeight: 700, color: rt.netSavings >= 0 ? '#38d068' : '#e04040' }}>{fmtC(rt.netSavings)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ padding: '16px 16px 8px' }}>
+          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>EXTRA TANKER vs SAVINGS</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={rt.curve} margin={{ top: 4, right: 24, left: 12, bottom: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={t.chartGrid} />
+              <XAxis dataKey="tankerExtra" tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }}
+                tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v}
+                axisLine={{ stroke: t.chartAxisLine }} tickLine={false} />
+              <YAxis tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }}
+                tickFormatter={v => `${sym}${(v/1000).toFixed(1)}k`} axisLine={false} tickLine={false} />
+              <RCTooltip content={<ChartTip sym={sym} t={t} />} />
+              <ReferenceLine y={0} stroke={t.border} strokeDasharray="4 4" />
+              <Line type="monotone" dataKey="netSavings" name="Net Savings" stroke="#f0a500" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="fuelAtB" name={`Fuel at ${rt.turnIcao}`} stroke="#4db8ff" strokeWidth={1.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── WEIGHT BREAKDOWN PANEL ──────────────────────────────────────────────────
+function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
+  const setWB = (k, v) => onUpdate(k, v);
+  const setWBNum = (k, raw) => onUpdate(k, raw === '' ? '' : +raw);
+  const wU = wb.wbUnit;
+
+  const totalLbs = computeZFWLbs(wb);
+  const totalDisplay = wU === 'kg' ? Math.round(totalLbs * LBS_TO_KG) : Math.round(totalLbs);
+
+  const items = [
+    { key: 'oew', label: `Operating Empty Weight (${wU})`, tip: 'Aircraft empty weight including crew, oils, fluids, and standard equipment.' },
+    { key: 'paxCount', label: 'Passenger Count', tip: 'Number of passengers on board.', noUnit: true },
+    { key: 'avgPaxWt', label: `Avg Passenger Weight (${wU})`, tip: 'Average weight per passenger including carry-on. FAA standard: 200 lbs summer.' },
+    { key: 'checkedBags', label: `Checked Bags (${wU})`, tip: 'Total weight of all checked baggage.' },
+    { key: 'carryOn', label: `Carry-On Bags (${wU})`, tip: 'Total carry-on baggage weight (if not included in passenger weight).' },
+    { key: 'cargo', label: `Cargo / Freight (${wU})`, tip: 'Weight of cargo, freight, or mail in the hold.' },
+    { key: 'catering', label: `Catering / Supplies (${wU})`, tip: 'Weight of food, drinks, and galley supplies.' },
+    { key: 'other', label: `Other / Misc (${wU})`, tip: 'Any additional weight items not covered above.' },
+  ];
+
+  return (
+    <Panel num="WT" title="Weight Breakdown" t={t} extra={
+      <Toggle value={wb.enabled ? 'on' : 'off'}
+        options={[{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]}
+        onChange={v => setWB('enabled', v === 'on')} t={t} />
+    }>
+      {!wb.enabled ? (
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, color: t.textMuted, padding: '8px 0' }}>
+          Enable to break down ZFW into individual components (passengers, bags, cargo, etc.)
+        </div>
+      ) : (
+        <>
+          <Field label="Weight Unit" t={t}>
+            <Toggle value={wU} options={[{ value: 'lbs', label: 'LBS' }, { value: 'kg', label: 'KG' }]} onChange={v => setWB('wbUnit', v)} t={t} />
+          </Field>
+
+          <Row2>
+            <Field label={items[0].label} tip={items[0].tip} t={t}>
+              <input style={mkInputStyle(t)} type="number" value={wb.oew} onChange={e => setWBNum('oew', e.target.value)} />
+            </Field>
+            <Field label={items[1].label} tip={items[1].tip} t={t}>
+              <input style={mkInputStyle(t)} type="number" min={0} max={999} value={wb.paxCount} onChange={e => setWBNum('paxCount', e.target.value)} />
+            </Field>
+          </Row2>
+
+          <Field label={items[2].label} tip={items[2].tip} t={t}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input style={{ ...mkInputStyle(t), flex: 1 }} type="number" value={wb.avgPaxWt} onChange={e => setWBNum('avgPaxWt', e.target.value)} />
+              <div style={{ display: 'flex', gap: 4 }}>
+                {[{ l: 'FAA', v: wU === 'kg' ? 91 : 200 }, { l: 'EASA', v: wU === 'kg' ? 94 : 207 }].map(std => (
+                  <button key={std.l} onClick={() => setWBNum('avgPaxWt', std.v)} style={{
+                    background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 2,
+                    color: t.accent, cursor: 'pointer', padding: '4px 8px',
+                    fontFamily: "'Barlow Condensed', sans-serif", fontSize: 10, letterSpacing: '1px',
+                  }}>{std.l}</button>
+                ))}
+              </div>
+            </div>
+          </Field>
+
+          <Row2>
+            {items.slice(3, 5).map(it => (
+              <Field key={it.key} label={it.label} tip={it.tip} t={t}>
+                <input style={mkInputStyle(t)} type="number" value={wb[it.key]} onChange={e => setWBNum(it.key, e.target.value)} />
+              </Field>
+            ))}
+          </Row2>
+          <Row2>
+            {items.slice(5, 7).map(it => (
+              <Field key={it.key} label={it.label} tip={it.tip} t={t}>
+                <input style={mkInputStyle(t)} type="number" value={wb[it.key]} onChange={e => setWBNum(it.key, e.target.value)} />
+              </Field>
+            ))}
+          </Row2>
+          <Field label={items[7].label} tip={items[7].tip} t={t}>
+            <input style={mkInputStyle(t)} type="number" value={wb.other} onChange={e => setWBNum('other', e.target.value)} />
+          </Field>
+
+          {/* Computed ZFW total */}
+          <div style={{
+            borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 12,
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+          }}>
+            <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textSec }}>
+              COMPUTED ZFW
+            </span>
+            <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 20, fontWeight: 700, color: t.accent }}>
+              {totalDisplay.toLocaleString()} {wU}
+            </span>
+          </div>
+        </>
+      )}
+    </Panel>
   );
 }
 
@@ -924,6 +1241,7 @@ function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveL
 export default function TankeringTool() {
   const [state, setState] = useState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
   const [results, setResults] = useState(null);
+  const [roundTripResult, setRoundTripResult] = useState(null);
   const [errors, setErrors] = useState({});
   const [unitSys, setUnitSys] = useState('imperial');
   const [theme, setTheme] = useState('dark');
@@ -935,6 +1253,21 @@ export default function TankeringTool() {
 
   const setShared = useCallback((k, v) => setState(p => ({ ...p, [k]: v })), []);
   const setSharedNum = useCallback((k, raw) => setState(p => ({ ...p, [k]: raw === '' ? '' : +raw })), []);
+
+  const updateWB = useCallback((key, value) => {
+    setState(prev => ({ ...prev, weightBreakdown: { ...prev.weightBreakdown, [key]: value } }));
+  }, []);
+
+  // Sync weight breakdown → ZFW
+  useEffect(() => {
+    if (!state.weightBreakdown.enabled) return;
+    const totalLbs = computeZFWLbs(state.weightBreakdown);
+    if (totalLbs <= 0) return;
+    const zfwInUnit = Math.round(fromLbs(totalLbs, state.fuelUnit));
+    if (zfwInUnit !== state.zfw) {
+      setState(prev => ({ ...prev, zfw: zfwInUnit }));
+    }
+  }, [state.weightBreakdown, state.fuelUnit]);
 
   const updateLeg = useCallback((index, key, value) => {
     setState(prev => {
@@ -1042,14 +1375,27 @@ export default function TankeringTool() {
       Object.assign(allErrors, validateLeg(state, leg, i));
     });
     setErrors(allErrors);
-    if (Object.keys(allErrors).length) { setResults(null); return; }
+    if (Object.keys(allErrors).length) { setResults(null); setRoundTripResult(null); return; }
     const legResults = state.legs.map(leg => runCalc(state, leg));
     setResults(legResults);
+
+    // Round-trip analysis: check consecutive leg pairs where departure fuel is cheaper
+    let rtResult = null;
+    if (state.legs.length >= 2) {
+      for (let i = 0; i < state.legs.length - 1; i++) {
+        const rt = runRoundTripAnalysis(state, state.legs[i], state.legs[i + 1]);
+        if (rt && rt.netSavings > 0 && (!rtResult || rt.netSavings > rtResult.netSavings)) {
+          rtResult = rt;
+        }
+      }
+    }
+    setRoundTripResult(rtResult);
   }, [state]);
 
   const handleReset = useCallback(() => {
     setState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
     setResults(null);
+    setRoundTripResult(null);
     setErrors({});
     setUnitSys('imperial');
   }, []);
@@ -1215,6 +1561,9 @@ export default function TankeringTool() {
             </Field>
           </Panel>
 
+          {/* WEIGHT BREAKDOWN (optional) */}
+          <WeightBreakdownPanel wb={state.weightBreakdown} fuelUnit={state.fuelUnit} onUpdate={updateWB} t={t} />
+
           {/* LEG CARDS */}
           {state.legs.map((leg, i) => (
             <LegCard
@@ -1230,10 +1579,10 @@ export default function TankeringTool() {
             />
           ))}
 
-          {/* ADD LEG BUTTON */}
-          <div style={{ gridColumn: '1 / -1' }}>
+          {/* ADD LEG BUTTONS */}
+          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 12 }}>
             <button onClick={addLeg} style={{
-              width: '100%', background: 'transparent',
+              flex: 1, background: 'transparent',
               border: `2px dashed ${t.border}`, borderRadius: 3,
               color: t.textSec, padding: '14px',
               fontFamily: "'Barlow Condensed', sans-serif",
@@ -1244,6 +1593,33 @@ export default function TankeringTool() {
             onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.color = t.accent; }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.textSec; }}
             >+ ADD LEG</button>
+            {state.legs.length === 1 && state.legs[0].departure && state.legs[0].destination && (
+              <button onClick={() => {
+                setState(prev => {
+                  const out = prev.legs[0];
+                  const ret = createLeg(out.destination);
+                  ret.destination = out.departure;
+                  ret.windScenario = out.windScenario;
+                  ret.cruiseFL = out.cruiseFL;
+                  ret.priceDep = out.priceDest;
+                  ret.priceDest = out.priceDep;
+                  ret.fboSurchargeDep = out.fboSurchargeDest;
+                  ret.fboSurchargeDest = out.fboSurchargeDep;
+                  return { ...prev, legs: [...prev.legs, ret] };
+                });
+              }} style={{
+                flex: 1, background: 'transparent',
+                border: `2px dashed ${t.border}`, borderRadius: 3,
+                color: t.textSec, padding: '14px',
+                fontFamily: "'Barlow Condensed', sans-serif",
+                fontSize: 15, fontWeight: 600, letterSpacing: '3px',
+                textTransform: 'uppercase', cursor: 'pointer',
+                transition: 'all 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = '#4db8ff'; e.currentTarget.style.color = '#4db8ff'; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.textSec; }}
+              >{'\u21C4'} ADD RETURN LEG</button>
+            )}
           </div>
 
           {/* ACTION BUTTONS */}
@@ -1296,6 +1672,11 @@ export default function TankeringTool() {
           {results && results.map((res, i) => (
             <ResultsPanel key={i} res={res} leg={state.legs[i]} shared={state} sym={sym} t={t} legIndex={i} totalLegs={state.legs.length} />
           ))}
+
+          {/* ROUND-TRIP ANALYSIS */}
+          {roundTripResult && (
+            <RoundTripResultPanel rtResult={roundTripResult} sym={sym} unit={state.fuelUnit} t={t} />
+          )}
         </div>
 
         {/* FOOTER */}
