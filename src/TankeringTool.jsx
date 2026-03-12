@@ -56,12 +56,13 @@ const THEMES = {
 };
 
 // ─── AIRCRAFT PRESETS (all values in US gallons — Jet-A ≈ 6.68 lb/gal) ──────
+// mlw = max landing weight, maxFuel = max fuel capacity, payloadRate = $/lb displaced payload revenue
 const AIRCRAFT_PRESETS = {
-  narrow:     { mtow: 26077, zfw: 14970, minLandingFuel: 898, altFuel: 674, burnPenaltyRate: 3.5 },
-  wide:       { mtow: 52545, zfw: 28144, minLandingFuel: 1497, altFuel: 1048, burnPenaltyRate: 3.0 },
-  bizjet:     { mtow: 14910, zfw: 5494, minLandingFuel: 449, altFuel: 299, burnPenaltyRate: 4.0 },
-  turboprop:  { mtow: 2246, zfw: 1497, minLandingFuel: 150, altFuel: 112, burnPenaltyRate: 4.5 },
-  helicopter: { mtow: 1018, zfw: 704, minLandingFuel: 75, altFuel: 45, burnPenaltyRate: 5.0 },
+  narrow:     { mtow: 26077, mlw: 19611, maxFuel: 6287, zfw: 14970, minLandingFuel: 898, altFuel: 674, burnPenaltyRate: 3.5, sfc: 0.06 },
+  wide:       { mtow: 52545, mlw: 41617, maxFuel: 15419, zfw: 28144, minLandingFuel: 1497, altFuel: 1048, burnPenaltyRate: 3.0, sfc: 0.055 },
+  bizjet:     { mtow: 14910, mlw: 11527, maxFuel: 6114, zfw: 5494, minLandingFuel: 449, altFuel: 299, burnPenaltyRate: 4.0, sfc: 0.07 },
+  turboprop:  { mtow: 2246, mlw: 2096, maxFuel: 539, zfw: 1497, minLandingFuel: 150, altFuel: 112, burnPenaltyRate: 4.5, sfc: 0.08 },
+  helicopter: { mtow: 1018, mlw: 988, maxFuel: 299, zfw: 704, minLandingFuel: 75, altFuel: 45, burnPenaltyRate: 5.0, sfc: 0.09 },
   custom: null,
 };
 
@@ -120,9 +121,12 @@ const INITIAL_STATE = {
   aircraftType: '',
   fuelUnit: 'gal',
   mtow: '',
+  mlw: '',
+  maxFuel: '',
   zfw: '',
   minLandingFuel: '',
   burnPenaltyRate: 3.5,
+  payloadRate: '',       // revenue per lb of displaced payload
   currency: 'USD',
   operationType: 'part121',
   legs: [createLeg('KHOU')],
@@ -145,10 +149,33 @@ function fromLbs(val, unit) {
 // ─── HELPERS ────────────────────────────────────────────────────────────────
 function n(v) { return v === '' ? 0 : +v; }
 
-// ─── CALCULATION ENGINE ───────────────────────────────────────────────────────
+// ─── CALCULATION ENGINE (Breguet-based with MLW, tank capacity, payload) ─────
+
+// Breguet burn penalty: extra fuel burned to carry X extra lbs over a trip
+// that normally burns tripFuel from a takeoff weight of baseWeight.
+// Uses simplified Breguet: fuel_burned = W_initial * (1 - e^(-R*SFC/V))
+// For the penalty: we compare burn at (baseWeight + X) vs burn at baseWeight.
+// Approximation: burnPenalty(X) = tripFuel * (e^(X * k / baseWeight) - 1)
+// where k ≈ burnPenaltyRate as a linearization anchor.
+function breguetBurnPenalty(extraLbs, tripFuelLbs, baseWeightLbs, burnRateLinear) {
+  if (baseWeightLbs <= 0 || tripFuelLbs <= 0 || extraLbs <= 0) return 0;
+  // k calibrated so that at small X, dBurn/dX ≈ burnRateLinear
+  // Breguet: burn(W) = W * (1 - e^(-c)) where c = R*SFC/(V*L/D)
+  // c = -ln(1 - tripFuel/baseWeight) for the base case
+  const fuelFrac = Math.min(tripFuelLbs / baseWeightLbs, 0.95);
+  const c = -Math.log(1 - fuelFrac);
+  // Burn at higher weight
+  const newWeight = baseWeightLbs + extraLbs;
+  const newBurn = newWeight * (1 - Math.exp(-c));
+  const penalty = newBurn - tripFuelLbs;
+  return Math.max(0, penalty);
+}
+
 function runCalc(shared, leg) {
   const unit = shared.fuelUnit;
   const mtow     = toLbs(n(shared.mtow), unit);
+  const mlw      = toLbs(n(shared.mlw), unit);
+  const maxFuelCap = toLbs(n(shared.maxFuel), unit);
   const zfw      = toLbs(n(shared.zfw), unit);
   const tripFuel = toLbs(n(leg.tripFuel), unit);
   const minLand  = toLbs(n(shared.minLandingFuel), unit);
@@ -156,49 +183,127 @@ function runCalc(shared, leg) {
   const minPurch = toLbs(n(leg.minPurchaseReq), unit);
   const burnRate = n(shared.burnPenaltyRate) / 100;
   const contPct  = n(leg.contingencyPct) / 100;
+  const payloadRate = n(shared.payloadRate);  // $/lb displaced
 
   const tripEff  = tripFuel * (1 + contPct);
   const taxMult  = 1 + n(leg.taxDiffPct) / 100;
   const pDep     = n(leg.priceDep) + n(leg.upliftDep);
   const pDest    = (n(leg.priceDest) + n(leg.upliftDest)) * taxMult;
 
-  const headroom   = mtow - zfw - tripEff - minLand - altFuel;
-  const maxTankLbs = Math.max(0, headroom / (1 + burnRate));
-  const savingsPerUnit = pDest - burnRate * pDep;
-  const optLbs     = savingsPerUnit > 0 ? maxTankLbs : 0;
+  // Base takeoff weight (without tankered fuel)
+  const baseTOW = zfw + tripEff + minLand + altFuel;
 
-  const burnPenLbs = optLbs * burnRate;
-  const grossSav   = optLbs * pDest;
-  const costCarry  = burnPenLbs * pDep;
+  // === CONSTRAINT 1: MTOW headroom ===
+  const mtowHeadroom = mtow > 0 ? Math.max(0, mtow - baseTOW) : Infinity;
 
-  let feeAdj = 0;
-  if (optLbs > 0 && minPurch > 0) {
-    const stillNeeded = Math.max(0, minPurch - optLbs);
-    if (stillNeeded <= 0) feeAdj = n(leg.rampFee);
-    else feeAdj = -(stillNeeded * pDest);
+  // === CONSTRAINT 2: MLW — landing weight must not exceed MLW ===
+  // Landing weight = TOW - tripFuel burned + tankered - burn_penalty
+  // Simplified: at landing you have ZFW + minLand + altFuel + (tanker - burnPenalty)
+  // Must be ≤ MLW.  So tanker - burnPenalty ≤ MLW - ZFW - minLand - altFuel
+  // Since burnPenalty grows with tanker, we solve iteratively.
+  let mlwLimit = Infinity;
+  if (mlw > 0) {
+    const landBase = zfw + minLand + altFuel;
+    const mlwRoom = Math.max(0, mlw - landBase);
+    // Iterate to find max tanker such that tanker - burnPenalty(tanker) ≤ mlwRoom
+    let lo = 0, hi = mtowHeadroom;
+    for (let iter = 0; iter < 30; iter++) {
+      const mid = (lo + hi) / 2;
+      const bp = breguetBurnPenalty(mid, tripEff, baseTOW, burnRate);
+      if (mid - bp <= mlwRoom) lo = mid; else hi = mid;
+    }
+    mlwLimit = lo;
   }
 
-  const netSav         = grossSav - costCarry + feeAdj;
+  // === CONSTRAINT 3: Max fuel capacity ===
+  // Total fuel on board = tripEff + minLand + altFuel + tanker + burnPenalty(tanker)
+  let fuelCapLimit = Infinity;
+  if (maxFuelCap > 0) {
+    const baseFuel = tripEff + minLand + altFuel;
+    const fuelRoom = Math.max(0, maxFuelCap - baseFuel);
+    // tanker + burnPenalty(tanker) ≤ fuelRoom
+    let lo = 0, hi = mtowHeadroom;
+    for (let iter = 0; iter < 30; iter++) {
+      const mid = (lo + hi) / 2;
+      const bp = breguetBurnPenalty(mid, tripEff, baseTOW, burnRate);
+      if (mid + bp <= fuelRoom) lo = mid; else hi = mid;
+    }
+    fuelCapLimit = lo;
+  }
+
+  // Overall max tankerable
+  const maxTankLbs = Math.max(0, Math.min(mtowHeadroom, mlwLimit, fuelCapLimit));
+
+  // Which constraint is binding?
+  let limitingFactor = 'mtow';
+  if (maxTankLbs >= mtowHeadroom - 1) limitingFactor = 'mtow';
+  if (mlwLimit <= mtowHeadroom && mlwLimit <= fuelCapLimit) limitingFactor = 'mlw';
+  if (fuelCapLimit <= mtowHeadroom && fuelCapLimit <= mlwLimit) limitingFactor = 'fuel_cap';
+
+  // === Find optimal tanker amount using Breguet burn ===
+  // Net savings(X) = X * pDest - burnPenalty(X) * pDep - payloadDisplacement(X)
+  // Payload displacement: if baseTOW + X + burnPenalty > MTOW, we must offload payload
+  // payloadDisp(X) = max(0, baseTOW + X + burnPenalty(X) - mtow) * payloadRate
+  // Since burnPenalty is nonlinear, we search for the optimum numerically.
+  function netSavingsAt(xLbs) {
+    const bp = breguetBurnPenalty(xLbs, tripEff, baseTOW, burnRate);
+    const gross = xLbs * pDest;
+    const carry = bp * pDep;
+    // Payload displacement
+    let payloadDisp = 0;
+    if (mtow > 0 && payloadRate > 0) {
+      const overweight = Math.max(0, baseTOW + xLbs + bp - mtow);
+      payloadDisp = overweight * payloadRate;
+    }
+    let fee = 0;
+    if (xLbs > 0 && minPurch > 0) {
+      const stillNeeded = Math.max(0, minPurch - xLbs);
+      if (stillNeeded <= 0) fee = n(leg.rampFee);
+      else fee = -(stillNeeded * pDest);
+    }
+    return { net: gross - carry - payloadDisp + fee, gross, carry, bp, payloadDisp, fee };
+  }
+
+  // Search for optimal: sample across range and pick the best
+  const SEARCH_STEPS = 200;
+  let bestX = 0, bestNet = 0;
+  for (let i = 0; i <= SEARCH_STEPS; i++) {
+    const xLbs = (maxTankLbs / SEARCH_STEPS) * i;
+    const { net } = netSavingsAt(xLbs);
+    if (net > bestNet) { bestNet = net; bestX = xLbs; }
+  }
+
+  const opt = netSavingsAt(bestX);
+
+  // Break-even: linear approximation still useful for display
   const breakEvenDelta = burnRate * pDep;
   const actualDelta    = pDest - pDep;
 
+  // Sensitivity curve with Breguet burn
   const STEPS = 30;
   const sensitivityData = [];
   for (let i = 0; i <= STEPS; i++) {
     const xLbs = (maxTankLbs / STEPS) * i;
+    const s = netSavingsAt(xLbs);
     sensitivityData.push({
       tanker:       Math.round(fromLbs(xLbs, unit)),
-      grossSavings: Math.round(xLbs * pDest),
-      costToCarry:  Math.round(xLbs * burnRate * pDep),
-      netSavings:   Math.round(xLbs * pDest - xLbs * burnRate * pDep),
+      grossSavings: Math.round(s.gross),
+      costToCarry:  Math.round(s.carry),
+      netSavings:   Math.round(s.net),
     });
   }
 
   return {
-    maxTanker: fromLbs(maxTankLbs, unit), optTanker: fromLbs(optLbs, unit),
-    burnPenalty: fromLbs(burnPenLbs, unit),
-    grossSav, costCarry, feeAdj, netSav,
-    breakEvenDelta, actualDelta, sensitivityData, savingsPerUnit,
+    maxTanker:    fromLbs(maxTankLbs, unit),
+    optTanker:    fromLbs(bestX, unit),
+    burnPenalty:  fromLbs(opt.bp, unit),
+    grossSav:     opt.gross,
+    costCarry:    opt.carry,
+    payloadDisp:  opt.payloadDisp,
+    feeAdj:       opt.fee,
+    netSav:       opt.net,
+    breakEvenDelta, actualDelta,
+    sensitivityData, limitingFactor,
   };
 }
 
@@ -239,6 +344,8 @@ const AIRPORTS = [
   { icao: 'KLGA', name: 'LaGuardia', city: 'New York', lat: 40.7772, lon: -73.8726 },
   { icao: 'KIAH', name: 'George Bush Intercontinental', city: 'Houston', lat: 29.9844, lon: -95.3414 },
   { icao: 'KHOU', name: 'William P Hobby', city: 'Houston', lat: 29.6454, lon: -95.2789 },
+  { icao: 'KNEW', name: 'Lakefront', city: 'New Orleans', lat: 30.0424, lon: -90.0283 },
+  { icao: 'KHDC', name: 'Hammond Northshore Regional', city: 'Hammond', lat: 30.5216, lon: -90.4184 },
   { icao: 'KPHX', name: 'Phoenix Sky Harbor Intl', city: 'Phoenix', lat: 33.4373, lon: -112.0078 },
   { icao: 'KCLT', name: 'Charlotte Douglas Intl', city: 'Charlotte', lat: 35.2140, lon: -80.9431 },
   { icao: 'KDCA', name: 'Ronald Reagan Washington Natl', city: 'Washington', lat: 38.8512, lon: -77.0402 },
@@ -552,11 +659,14 @@ function ChartTip({ active, payload, label, sym, t }) {
 // ─── RESULTS PANEL ────────────────────────────────────────────────────────────
 function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
   const { maxTanker, optTanker, burnPenalty, grossSav, costCarry,
-          feeAdj, netSav, breakEvenDelta, actualDelta, sensitivityData } = res;
+          payloadDisp, feeAdj, netSav, breakEvenDelta, actualDelta,
+          sensitivityData, limitingFactor } = res;
   const unit = shared.fuelUnit;
   const fmtN = (n, d = 0) => n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
   const fmtU = (n) => `${fmtN(n, 1)} ${unit}`;
   const fmtC = (n, d = 2) => `${n < 0 ? '-' : ''}${sym}${fmtN(Math.abs(n), d)}`;
+
+  const limitLabels = { mtow: 'MTOW', mlw: 'MLW', fuel_cap: 'TANK CAPACITY' };
 
   let status = 'go';
   if (netSav <= 0) status = 'no-go';
@@ -571,10 +681,12 @@ function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
 
   const dataRows = [
     { label: 'Max Tankerable Fuel',       val: fmtU(maxTanker) },
+    { label: 'Limiting Constraint',       val: limitLabels[limitingFactor] || 'MTOW', color: t.accent },
     { label: 'Recommended Tanker Amount', val: fmtU(optTanker), highlight: true },
-    { label: 'Fuel Burn Penalty',         val: fmtU(burnPenalty) },
+    { label: 'Burn Penalty (Breguet)',    val: fmtU(burnPenalty) },
     { label: 'Gross Savings',             val: fmtC(grossSav), color: '#38d068' },
-    { label: 'Cost of Tankering',         val: `\u2212${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
+    { label: 'Cost of Carry',             val: `\u2212${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
+    ...(payloadDisp > 0 ? [{ label: 'Payload Displacement',   val: `\u2212${sym}${fmtN(payloadDisp,2)}`, color: '#e04040' }] : []),
     { label: 'Fee Adjustment',            val: fmtC(feeAdj), color: feeAdj >= 0 ? '#38d068' : '#e04040' },
     { label: 'Break-Even Delta',          val: `${sym}${fmtN(breakEvenDelta,4)}/${unit}` },
     { label: 'Actual Price Diff',         val: `${sym}${fmtN(actualDelta,4)}/${unit}`, color: actualDelta > breakEvenDelta ? '#38d068' : '#e04040' },
@@ -826,6 +938,8 @@ export default function TankeringTool() {
         ...prev,
         aircraftType: type,
         mtow: convert(preset.mtow),
+        mlw: convert(preset.mlw),
+        maxFuel: convert(preset.maxFuel),
         zfw: convert(preset.zfw),
         minLandingFuel: convert(preset.minLandingFuel),
         burnPenaltyRate: preset.burnPenaltyRate,
@@ -868,6 +982,8 @@ export default function TankeringTool() {
       return {
         ...prev,
         mtow: convert(prev.mtow),
+        mlw: convert(prev.mlw),
+        maxFuel: convert(prev.maxFuel),
         zfw: convert(prev.zfw),
         minLandingFuel: convert(prev.minLandingFuel),
         fuelUnit: targetUnit,
@@ -985,16 +1101,29 @@ export default function TankeringTool() {
             </Field>
 
             <Row2>
-              <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight" error={errors.mtow} t={t}>
+              <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight — hard structural limit." error={errors.mtow} t={t}>
                 <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
               </Field>
-              <Field label={`ZFW (${unit})`} tip="Zero Fuel Weight" error={errors.zfw} t={t}>
+              <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — if tankered fuel isn't burned off, you may exceed this. Limits tankering on short sectors." t={t}>
+                <input style={mkInputStyle(t)} type="number" value={state.mlw} onChange={e => setSharedNum('mlw', e.target.value)} />
+              </Field>
+            </Row2>
+
+            <Row2>
+              <Field label={`ZFW (${unit})`} tip="Zero Fuel Weight — aircraft + payload, no fuel." error={errors.zfw} t={t}>
                 <input style={mkInputStyle(t, errors.zfw)} type="number" value={state.zfw} onChange={e => setSharedNum('zfw', e.target.value)} />
+              </Field>
+              <Field label={`Max Fuel Capacity (${unit})`} tip="Maximum fuel the tanks can hold. Hard limit regardless of weight." t={t}>
+                <input style={mkInputStyle(t)} type="number" value={state.maxFuel} onChange={e => setSharedNum('maxFuel', e.target.value)} />
               </Field>
             </Row2>
 
             <Field label={`Min Landing Fuel (${unit})`} tip="Minimum fuel at landing including reserves." t={t}>
               <input style={mkInputStyle(t)} type="number" value={state.minLandingFuel} onChange={e => setSharedNum('minLandingFuel', e.target.value)} />
+            </Field>
+
+            <Field label="Payload Displacement Rate ($/lb)" tip="Revenue lost per pound of cargo/passengers offloaded to make room for tankered fuel. Leave blank or 0 if payload is fixed." t={t}>
+              <input style={mkInputStyle(t)} type="number" step={0.01} value={state.payloadRate} onChange={e => setSharedNum('payloadRate', e.target.value)} />
             </Field>
 
             <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned due to carrying additional weight. 3-4% typical for jets." t={t}>
