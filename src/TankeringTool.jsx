@@ -1,7 +1,7 @@
 // TankeringTool.jsx — Aviation Fuel Tankering Decision Tool
 // Single self-contained React component. Requires recharts.
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip as RCTooltip, Legend, ResponsiveContainer, ReferenceLine, Cell
@@ -17,38 +17,115 @@ const LIT_TO_LBS  = 1.776;
 
 const CURRENCY_SYMBOLS = { USD: '$', EUR: '€', GBP: '£', CAD: 'C$', AED: '﷼', SGD: 'S$' };
 
-// ─── DEFAULTS (B737-800 / EGLL→KJFK example) ─────────────────────────────────
-const DEFAULTS = {
-  departure:       'EGLL',
-  destination:     'KJFK',
-  aircraftType:    'narrow',
-  distance:        3450,
-  flightHours:     7,
-  flightMinutes:   30,
-  windComponent:   20,
-  // Weight & Performance  (quantities in US gallons — Jet-A ≈ 6.68 lb/gal)
-  weightUnit:      'gal',
-  fuelUnit:        'gal',
-  mtow:            26077,   // 174,200 lb ÷ 6.68
-  zfw:             14970,   // 100,000 lb ÷ 6.68
-  tripFuel:        8233,    //  55,000 lb ÷ 6.68
-  minLandingFuel:  898,     //   6,000 lb ÷ 6.68
+// ─── THEMES ──────────────────────────────────────────────────────────────────
+const THEMES = {
+  dark: {
+    pageBg: '#0c0f16', panelBg: '#141820', headerBg: '#1a2030',
+    border: '#1e2a3a', inputBg: '#0c0f16',
+    text: '#dde3f0', textSec: '#8a9ab8', textMuted: '#506880',
+    accent: '#f0a500', accentDim: '#c08800',
+    toggleActiveBg: '#1e2d45', toggleActiveText: '#4db8ff', toggleText: '#7a8fa8',
+    dropdownBg: '#141820', dropdownHover: '#1e2d45', dropdownBorder: '#2a3550',
+    chartGrid: '#1a2535', chartAxis: '#6a7a90', chartAxisLine: '#1e2a3a',
+    tipBg: '#1c2235', tipBorder: '#2a3550', tipText: '#b8c4d8',
+    rowBorder: '#131a28', summaryBg: '#0f1219',
+    headerGrad: 'linear-gradient(180deg,#141c28 0%,#0c0f16 100%)',
+    runBtnBg: 'linear-gradient(180deg, #182a1c 0%, #0e1a11 100%)',
+    runBtnBorder: '#28a048', runBtnGlow: 'rgba(40,160,72,0.35)',
+    warnBg: '#1a1a0a', warnBorder: '#3a3010', warnText: '#c8a840',
+    errBg: '#1e0c0c', errBorder: '#6a2020',
+    shadow: 'rgba(0,0,0,0.6)',
+  },
+  light: {
+    pageBg: '#f0f2f5', panelBg: '#ffffff', headerBg: '#eef1f6',
+    border: '#d0d5dd', inputBg: '#ffffff',
+    text: '#1a2030', textSec: '#4a5a70', textMuted: '#8a95a5',
+    accent: '#c08800', accentDim: '#9a6e00',
+    toggleActiveBg: '#d0e4ff', toggleActiveText: '#1a6dd0', toggleText: '#6a7a90',
+    dropdownBg: '#ffffff', dropdownHover: '#e8f0ff', dropdownBorder: '#c0cad8',
+    chartGrid: '#e0e4ea', chartAxis: '#6a7a90', chartAxisLine: '#d0d5dd',
+    tipBg: '#ffffff', tipBorder: '#c0cad8', tipText: '#4a5a70',
+    rowBorder: '#eef1f6', summaryBg: '#f6f8fa',
+    headerGrad: 'linear-gradient(180deg,#e8ecf2 0%,#f0f2f5 100%)',
+    runBtnBg: 'linear-gradient(180deg, #e8f5ec 0%, #d0ecd6 100%)',
+    runBtnBorder: '#28a048', runBtnGlow: 'rgba(40,160,72,0.25)',
+    warnBg: '#fef8e8', warnBorder: '#e0c860', warnText: '#8a6a00',
+    errBg: '#fef0f0', errBorder: '#e0a0a0',
+    shadow: 'rgba(0,0,0,0.15)',
+  },
+};
+
+// ─── AIRCRAFT PRESETS (all values in US gallons — Jet-A ≈ 6.68 lb/gal) ──────
+const AIRCRAFT_PRESETS = {
+  narrow:     { mtow: 26077, zfw: 14970, minLandingFuel: 898, altFuel: 674, burnPenaltyRate: 3.5 },
+  wide:       { mtow: 52545, zfw: 28144, minLandingFuel: 1497, altFuel: 1048, burnPenaltyRate: 3.0 },
+  bizjet:     { mtow: 14910, zfw: 5494, minLandingFuel: 449, altFuel: 299, burnPenaltyRate: 4.0 },
+  turboprop:  { mtow: 2246, zfw: 1497, minLandingFuel: 150, altFuel: 112, burnPenaltyRate: 4.5 },
+  helicopter: { mtow: 1018, zfw: 704, minLandingFuel: 75, altFuel: 45, burnPenaltyRate: 5.0 },
+  custom: null,
+};
+
+// Fuel burn per hour (gallons) by aircraft type
+const FUEL_BURN_PER_HOUR = {
+  narrow: 850, wide: 2800, bizjet: 450, turboprop: 100, helicopter: 110,
+};
+
+// Typical cruise ground speeds (kt) by aircraft type
+const CRUISE_SPEEDS = {
+  narrow: 450, wide: 490, bizjet: 470, turboprop: 270, helicopter: 140, custom: 450, '': 450,
+};
+
+// ─── WIND SCENARIOS ──────────────────────────────────────────────────────────
+const WIND_SCENARIOS = [
+  { value: 'calm',        label: 'Calm / Variable',   kt: 0 },
+  { value: 'light_tail',  label: 'Light Tailwind',    kt: -15 },
+  { value: 'mod_tail',    label: 'Moderate Tailwind',  kt: -30 },
+  { value: 'strong_tail', label: 'Strong Tailwind',   kt: -50 },
+  { value: 'light_head',  label: 'Light Headwind',    kt: 15 },
+  { value: 'mod_head',    label: 'Moderate Headwind',  kt: 30 },
+  { value: 'strong_head', label: 'Strong Headwind',   kt: 50 },
+  { value: 'severe_head', label: 'Severe Headwind',   kt: 80 },
+];
+
+function getWindKt(scenario) {
+  return WIND_SCENARIOS.find(w => w.value === scenario)?.kt || 0;
+}
+
+// ─── DEFAULT LEG ─────────────────────────────────────────────────────────────
+function createLeg(departure = '') {
+  return {
+    id: Math.random().toString(36).slice(2, 10),
+    departure,
+    destination: '',
+    distance: '',
+    flightHours: '',
+    flightMinutes: '',
+    windScenario: 'calm',
+    tripFuel: '',
+    priceDep: '',
+    priceDest: '',
+    upliftDep: '',
+    upliftDest: '',
+    minPurchaseReq: '',
+    rampFee: '',
+    altRequired: true,
+    altFuel: '',
+    intlFlight: true,
+    contingencyPct: 5,
+    taxDiffPct: 0,
+  };
+}
+
+const INITIAL_STATE = {
+  aircraftType: '',
+  fuelUnit: 'gal',
+  mtow: '',
+  zfw: '',
+  minLandingFuel: '',
   burnPenaltyRate: 3.5,
-  // Pricing (per US gallon)
-  currency:        'USD',
-  priceDep:        6.15,    // ≈ $0.92/lb × 6.68
-  priceDest:       7.88,    // ≈ $1.18/lb × 6.68
-  upliftDep:       0.27,    // ≈ $0.04/lb × 6.68
-  upliftDest:      0.40,    // ≈ $0.06/lb × 6.68
-  minPurchaseReq:  0,
-  rampFee:         0,
-  // Regulatory
-  operationType:   'part121',
-  altRequired:     true,
-  altFuel:         674,     //   4,500 lb ÷ 6.68
-  contingencyPct:  5,
-  intlFlight:      true,
-  taxDiffPct:      0,
+  currency: 'USD',
+  operationType: 'part121',
+  legs: [createLeg('KHOU')],
 };
 
 // ─── UNIT CONVERSION ──────────────────────────────────────────────────────────
@@ -56,7 +133,7 @@ function toLbs(val, unit) {
   if (unit === 'kg')     return val * KG_TO_LBS;
   if (unit === 'gal')    return val * GAL_TO_LBS;
   if (unit === 'liters') return val * LIT_TO_LBS;
-  return val; // lbs
+  return val;
 }
 function fromLbs(val, unit) {
   if (unit === 'kg')     return val * LBS_TO_KG;
@@ -65,147 +142,270 @@ function fromLbs(val, unit) {
   return val;
 }
 
+// ─── HELPERS ────────────────────────────────────────────────────────────────
+function n(v) { return v === '' ? 0 : +v; }
+
 // ─── CALCULATION ENGINE ───────────────────────────────────────────────────────
-function runCalc(inp) {
-  const unit = inp.fuelUnit;
-  // Normalise everything to lbs internally
-  const mtow       = toLbs(inp.mtow,           unit);
-  const zfw        = toLbs(inp.zfw,            unit);
-  const tripFuel   = toLbs(inp.tripFuel,       unit);
-  const minLand    = toLbs(inp.minLandingFuel, unit);
-  const altFuel    = inp.altRequired ? toLbs(inp.altFuel, unit) : 0;
-  const minPurch   = toLbs(inp.minPurchaseReq, unit);
-  const burnRate   = inp.burnPenaltyRate / 100;
-  const contPct    = inp.contingencyPct / 100;
+function runCalc(shared, leg) {
+  const unit = shared.fuelUnit;
+  const mtow     = toLbs(n(shared.mtow), unit);
+  const zfw      = toLbs(n(shared.zfw), unit);
+  const tripFuel = toLbs(n(leg.tripFuel), unit);
+  const minLand  = toLbs(n(shared.minLandingFuel), unit);
+  const altFuel  = leg.altRequired ? toLbs(n(leg.altFuel), unit) : 0;
+  const minPurch = toLbs(n(leg.minPurchaseReq), unit);
+  const burnRate = n(shared.burnPenaltyRate) / 100;
+  const contPct  = n(leg.contingencyPct) / 100;
 
-  // Effective trip fuel with contingency
-  const tripEff = tripFuel * (1 + contPct);
+  const tripEff  = tripFuel * (1 + contPct);
+  const taxMult  = 1 + n(leg.taxDiffPct) / 100;
+  const pDep     = n(leg.priceDep) + n(leg.upliftDep);
+  const pDest    = (n(leg.priceDest) + n(leg.upliftDest)) * taxMult;
 
-  // Destination price including tax differential
-  const taxMult  = 1 + inp.taxDiffPct / 100;
-  const pDep     = inp.priceDep  + inp.upliftDep;          // total cost/unit at dep
-  const pDest    = (inp.priceDest + inp.upliftDest) * taxMult; // total cost/unit at dest
-
-  // Step 1 — Max tankerable (weight-limited)
-  // ZFW + tripEff + X*(1+burnRate) + minLand ≤ MTOW
-  // X ≤ (MTOW - ZFW - tripEff - minLand) / (1+burnRate)
-  const headroom      = mtow - zfw - tripEff - minLand - altFuel;
-  const maxTankLbs    = Math.max(0, headroom / (1 + burnRate));
-
-  // Step 6 — Savings per unit (linear model)
-  // Net_Savings(X) = X*(pDest) - X*burnRate*pDep
+  const headroom   = mtow - zfw - tripEff - minLand - altFuel;
+  const maxTankLbs = Math.max(0, headroom / (1 + burnRate));
   const savingsPerUnit = pDest - burnRate * pDep;
+  const optLbs     = savingsPerUnit > 0 ? maxTankLbs : 0;
 
-  // Optimal X: since linear, either 0 or maxTank
-  const optLbs = savingsPerUnit > 0 ? maxTankLbs : 0;
+  const burnPenLbs = optLbs * burnRate;
+  const grossSav   = optLbs * pDest;
+  const costCarry  = burnPenLbs * pDep;
 
-  const burnPenLbs   = optLbs * burnRate;
-  const grossSav     = optLbs * pDest;
-  const costCarry    = burnPenLbs * pDep;
-
-  // Fee adjustment
   let feeAdj = 0;
   if (optLbs > 0 && minPurch > 0) {
     const stillNeeded = Math.max(0, minPurch - optLbs);
-    if (stillNeeded <= 0) {
-      feeAdj = inp.rampFee; // flat ramp fee avoided
-    } else {
-      feeAdj = -(stillNeeded * pDest); // still need to buy min
-    }
-  } else if (optLbs === 0 && inp.rampFee === 0 && minPurch === 0) {
-    feeAdj = 0;
+    if (stillNeeded <= 0) feeAdj = n(leg.rampFee);
+    else feeAdj = -(stillNeeded * pDest);
   }
 
-  const netSav = grossSav - costCarry + feeAdj;
-
-  // Break-even delta
+  const netSav         = grossSav - costCarry + feeAdj;
   const breakEvenDelta = burnRate * pDep;
   const actualDelta    = pDest - pDep;
 
-  // Sensitivity curve (convert display back to chosen unit)
   const STEPS = 30;
   const sensitivityData = [];
   for (let i = 0; i <= STEPS; i++) {
     const xLbs = (maxTankLbs / STEPS) * i;
-    const gs   = xLbs * pDest;
-    const cc   = xLbs * burnRate * pDep;
-    const ns   = gs - cc;
     sensitivityData.push({
       tanker:       Math.round(fromLbs(xLbs, unit)),
-      grossSavings: Math.round(gs),
-      costToCarry:  Math.round(cc),
-      netSavings:   Math.round(ns),
+      grossSavings: Math.round(xLbs * pDest),
+      costToCarry:  Math.round(xLbs * burnRate * pDep),
+      netSavings:   Math.round(xLbs * pDest - xLbs * burnRate * pDep),
     });
   }
 
   return {
-    maxTanker:    fromLbs(maxTankLbs, unit),
-    optTanker:    fromLbs(optLbs, unit),
-    burnPenalty:  fromLbs(burnPenLbs, unit),
+    maxTanker: fromLbs(maxTankLbs, unit), optTanker: fromLbs(optLbs, unit),
+    burnPenalty: fromLbs(burnPenLbs, unit),
     grossSav, costCarry, feeAdj, netSav,
-    breakEvenDelta, actualDelta,
-    sensitivityData, savingsPerUnit,
+    breakEvenDelta, actualDelta, sensitivityData, savingsPerUnit,
   };
 }
 
 // ─── VALIDATION ───────────────────────────────────────────────────────────────
-function validate(inp) {
+function validateLeg(shared, leg, index) {
   const errs = {};
-  if (!inp.departure  || inp.departure.length  < 3) errs.departure  = 'Enter valid ICAO (3–4 chars)';
-  if (!inp.destination|| inp.destination.length < 3) errs.destination = 'Enter valid ICAO (3–4 chars)';
-  if (inp.mtow   <= 0) errs.mtow   = 'MTOW must be > 0';
-  if (inp.zfw    <= 0) errs.zfw    = 'ZFW must be > 0';
-  if (inp.zfw >= inp.mtow)         errs.zfw     = 'ZFW must be less than MTOW';
-  if (inp.tripFuel <= 0)           errs.tripFuel= 'Trip fuel must be > 0';
-  if (inp.priceDep  < 0)           errs.priceDep = 'Price cannot be negative';
-  if (inp.priceDest < 0)           errs.priceDest= 'Price cannot be negative';
-  const unit = inp.fuelUnit;
-  const totalLbs = toLbs(inp.zfw + inp.tripFuel + inp.minLandingFuel, unit);
-  if (totalLbs > toLbs(inp.mtow, unit)) {
-    errs.tripFuel = 'ZFW + Trip Fuel + Min Landing Fuel exceeds MTOW';
-  }
+  const pfx = index > 0 ? `Leg ${index + 1}: ` : '';
+  if (!leg.departure || leg.departure.length < 3)   errs[`dep_${index}`] = `${pfx}Enter valid departure ICAO`;
+  if (!leg.destination || leg.destination.length < 3) errs[`dest_${index}`] = `${pfx}Enter valid destination ICAO`;
+  if (!n(shared.mtow))                 errs.mtow = 'MTOW is required';
+  else if (n(shared.mtow) <= 0)       errs.mtow = 'MTOW must be > 0';
+  if (!n(shared.zfw))                  errs.zfw = 'ZFW is required';
+  else if (n(shared.zfw) <= 0)        errs.zfw = 'ZFW must be > 0';
+  else if (n(shared.zfw) >= n(shared.mtow)) errs.zfw = 'ZFW must be less than MTOW';
+  if (!n(leg.tripFuel))                errs[`trip_${index}`] = `${pfx}Trip fuel is required`;
+  else if (n(leg.tripFuel) <= 0)      errs[`trip_${index}`] = `${pfx}Trip fuel must be > 0`;
   return errs;
 }
 
-// ─── TOOLTIP COMPONENT ────────────────────────────────────────────────────────
-function InfoTip({ text }) {
+// ─── AIRPORTS DATABASE (with coordinates) ───────────────────────────────────
+const AIRPORTS = [
+  { icao: 'KJFK', name: 'John F Kennedy Intl', city: 'New York', lat: 40.6398, lon: -73.7789 },
+  { icao: 'KLAX', name: 'Los Angeles Intl', city: 'Los Angeles', lat: 33.9425, lon: -118.4081 },
+  { icao: 'KORD', name: "O'Hare Intl", city: 'Chicago', lat: 41.9742, lon: -87.9073 },
+  { icao: 'KATL', name: 'Hartsfield-Jackson Intl', city: 'Atlanta', lat: 33.6407, lon: -84.4277 },
+  { icao: 'KDFW', name: 'Dallas/Fort Worth Intl', city: 'Dallas', lat: 32.8998, lon: -97.0403 },
+  { icao: 'KDEN', name: 'Denver Intl', city: 'Denver', lat: 39.8561, lon: -104.6737 },
+  { icao: 'KSFO', name: 'San Francisco Intl', city: 'San Francisco', lat: 37.6213, lon: -122.3790 },
+  { icao: 'KSEA', name: 'Seattle-Tacoma Intl', city: 'Seattle', lat: 47.4502, lon: -122.3088 },
+  { icao: 'KLAS', name: 'Harry Reid Intl', city: 'Las Vegas', lat: 36.0840, lon: -115.1537 },
+  { icao: 'KMCO', name: 'Orlando Intl', city: 'Orlando', lat: 28.4312, lon: -81.3081 },
+  { icao: 'KMIA', name: 'Miami Intl', city: 'Miami', lat: 25.7959, lon: -80.2870 },
+  { icao: 'KBOS', name: 'Logan Intl', city: 'Boston', lat: 42.3656, lon: -71.0096 },
+  { icao: 'KMSP', name: 'Minneapolis-Saint Paul Intl', city: 'Minneapolis', lat: 44.8848, lon: -93.2223 },
+  { icao: 'KDTW', name: 'Detroit Metro Wayne County', city: 'Detroit', lat: 42.2124, lon: -83.3534 },
+  { icao: 'KPHL', name: 'Philadelphia Intl', city: 'Philadelphia', lat: 39.8721, lon: -75.2411 },
+  { icao: 'KEWR', name: 'Newark Liberty Intl', city: 'Newark', lat: 40.6895, lon: -74.1745 },
+  { icao: 'KLGA', name: 'LaGuardia', city: 'New York', lat: 40.7772, lon: -73.8726 },
+  { icao: 'KIAH', name: 'George Bush Intercontinental', city: 'Houston', lat: 29.9844, lon: -95.3414 },
+  { icao: 'KHOU', name: 'William P Hobby', city: 'Houston', lat: 29.6454, lon: -95.2789 },
+  { icao: 'KPHX', name: 'Phoenix Sky Harbor Intl', city: 'Phoenix', lat: 33.4373, lon: -112.0078 },
+  { icao: 'KCLT', name: 'Charlotte Douglas Intl', city: 'Charlotte', lat: 35.2140, lon: -80.9431 },
+  { icao: 'KDCA', name: 'Ronald Reagan Washington Natl', city: 'Washington', lat: 38.8512, lon: -77.0402 },
+  { icao: 'KIAD', name: 'Washington Dulles Intl', city: 'Washington', lat: 38.9445, lon: -77.4558 },
+  { icao: 'KBWI', name: 'Baltimore/Washington Intl', city: 'Baltimore', lat: 39.1754, lon: -76.6683 },
+  { icao: 'KSLC', name: 'Salt Lake City Intl', city: 'Salt Lake City', lat: 40.7884, lon: -111.9778 },
+  { icao: 'KSAN', name: 'San Diego Intl', city: 'San Diego', lat: 32.7336, lon: -117.1897 },
+  { icao: 'KTPA', name: 'Tampa Intl', city: 'Tampa', lat: 27.9755, lon: -82.5332 },
+  { icao: 'KPDX', name: 'Portland Intl', city: 'Portland', lat: 45.5898, lon: -122.5951 },
+  { icao: 'KSTL', name: 'St Louis Lambert Intl', city: 'St Louis', lat: 38.7487, lon: -90.3700 },
+  { icao: 'KMCI', name: 'Kansas City Intl', city: 'Kansas City', lat: 39.2976, lon: -94.7139 },
+  { icao: 'PANC', name: 'Ted Stevens Anchorage Intl', city: 'Anchorage', lat: 61.1741, lon: -149.9962 },
+  { icao: 'PHNL', name: 'Daniel K Inouye Intl', city: 'Honolulu', lat: 21.3187, lon: -157.9225 },
+  { icao: 'EGLL', name: 'Heathrow', city: 'London', lat: 51.4700, lon: -0.4543 },
+  { icao: 'EGKK', name: 'Gatwick', city: 'London', lat: 51.1481, lon: -0.1903 },
+  { icao: 'EGLC', name: 'London City', city: 'London', lat: 51.5053, lon: 0.0553 },
+  { icao: 'EGSS', name: 'Stansted', city: 'London', lat: 51.8850, lon: 0.2350 },
+  { icao: 'EGGW', name: 'Luton', city: 'London', lat: 51.8747, lon: -0.3683 },
+  { icao: 'EGBB', name: 'Birmingham', city: 'Birmingham', lat: 52.4539, lon: -1.7480 },
+  { icao: 'EGCC', name: 'Manchester', city: 'Manchester', lat: 53.3537, lon: -2.2750 },
+  { icao: 'EGPH', name: 'Edinburgh', city: 'Edinburgh', lat: 55.9500, lon: -3.3725 },
+  { icao: 'LFPG', name: 'Charles de Gaulle', city: 'Paris', lat: 49.0097, lon: 2.5479 },
+  { icao: 'LFPO', name: 'Orly', city: 'Paris', lat: 48.7233, lon: 2.3794 },
+  { icao: 'EDDF', name: 'Frankfurt', city: 'Frankfurt', lat: 50.0379, lon: 8.5622 },
+  { icao: 'EDDM', name: 'Munich', city: 'Munich', lat: 48.3538, lon: 11.7861 },
+  { icao: 'EDDB', name: 'Berlin Brandenburg', city: 'Berlin', lat: 52.3514, lon: 13.4939 },
+  { icao: 'EHAM', name: 'Schiphol', city: 'Amsterdam', lat: 52.3086, lon: 4.7639 },
+  { icao: 'EBBR', name: 'Brussels', city: 'Brussels', lat: 50.9014, lon: 4.4844 },
+  { icao: 'LSZH', name: 'Zurich', city: 'Zurich', lat: 47.4647, lon: 8.5492 },
+  { icao: 'LOWW', name: 'Vienna Intl', city: 'Vienna', lat: 48.1103, lon: 16.5697 },
+  { icao: 'LEMD', name: 'Adolfo Suárez Madrid-Barajas', city: 'Madrid', lat: 40.4719, lon: -3.5626 },
+  { icao: 'LEBL', name: 'Barcelona-El Prat', city: 'Barcelona', lat: 41.2971, lon: 2.0785 },
+  { icao: 'LPPT', name: 'Lisbon Humberto Delgado', city: 'Lisbon', lat: 38.7742, lon: -9.1342 },
+  { icao: 'LIRF', name: 'Leonardo da Vinci-Fiumicino', city: 'Rome', lat: 41.8003, lon: 12.2389 },
+  { icao: 'LIMC', name: 'Milano Malpensa', city: 'Milan', lat: 45.6306, lon: 8.7281 },
+  { icao: 'EKCH', name: 'Copenhagen Kastrup', city: 'Copenhagen', lat: 55.6180, lon: 12.6561 },
+  { icao: 'ESSA', name: 'Stockholm Arlanda', city: 'Stockholm', lat: 59.6519, lon: 17.9186 },
+  { icao: 'ENGM', name: 'Oslo Gardermoen', city: 'Oslo', lat: 60.1939, lon: 11.1004 },
+  { icao: 'EFHK', name: 'Helsinki-Vantaa', city: 'Helsinki', lat: 60.3172, lon: 24.9633 },
+  { icao: 'EIDW', name: 'Dublin', city: 'Dublin', lat: 53.4213, lon: -6.2701 },
+  { icao: 'EPWA', name: 'Warsaw Chopin', city: 'Warsaw', lat: 52.1657, lon: 20.9671 },
+  { icao: 'LKPR', name: 'Václav Havel Prague', city: 'Prague', lat: 50.1008, lon: 14.2600 },
+  { icao: 'LGAV', name: 'Athens Intl', city: 'Athens', lat: 37.9364, lon: 23.9445 },
+  { icao: 'LTFM', name: 'Istanbul', city: 'Istanbul', lat: 41.2753, lon: 28.7519 },
+  { icao: 'OMDB', name: 'Dubai Intl', city: 'Dubai', lat: 25.2528, lon: 55.3644 },
+  { icao: 'OMDW', name: 'Al Maktoum Intl (DWC)', city: 'Dubai', lat: 24.8967, lon: 55.1614 },
+  { icao: 'OMAA', name: 'Abu Dhabi Intl', city: 'Abu Dhabi', lat: 24.4330, lon: 54.6511 },
+  { icao: 'OTHH', name: 'Hamad Intl', city: 'Doha', lat: 25.2731, lon: 51.6081 },
+  { icao: 'OEJN', name: 'King Abdulaziz Intl', city: 'Jeddah', lat: 21.6796, lon: 39.1565 },
+  { icao: 'OERK', name: 'King Khalid Intl', city: 'Riyadh', lat: 24.9576, lon: 46.6988 },
+  { icao: 'OBBI', name: 'Bahrain Intl', city: 'Bahrain', lat: 26.2708, lon: 50.6336 },
+  { icao: 'OKBK', name: 'Kuwait Intl', city: 'Kuwait City', lat: 29.2266, lon: 47.9689 },
+  { icao: 'VHHH', name: 'Hong Kong Intl', city: 'Hong Kong', lat: 22.3080, lon: 113.9185 },
+  { icao: 'WSSS', name: 'Changi', city: 'Singapore', lat: 1.3502, lon: 103.9940 },
+  { icao: 'RJTT', name: 'Tokyo Haneda', city: 'Tokyo', lat: 35.5494, lon: 139.7798 },
+  { icao: 'RJAA', name: 'Tokyo Narita', city: 'Tokyo', lat: 35.7647, lon: 140.3864 },
+  { icao: 'RKSI', name: 'Incheon Intl', city: 'Seoul', lat: 37.4691, lon: 126.4505 },
+  { icao: 'ZBAD', name: 'Beijing Daxing', city: 'Beijing', lat: 39.5098, lon: 116.4105 },
+  { icao: 'ZSPD', name: 'Shanghai Pudong', city: 'Shanghai', lat: 31.1443, lon: 121.8083 },
+  { icao: 'ZGGG', name: 'Guangzhou Baiyun', city: 'Guangzhou', lat: 23.3924, lon: 113.2988 },
+  { icao: 'RCTP', name: 'Taiwan Taoyuan Intl', city: 'Taipei', lat: 25.0777, lon: 121.2330 },
+  { icao: 'VTBS', name: 'Suvarnabhumi', city: 'Bangkok', lat: 13.6900, lon: 100.7501 },
+  { icao: 'WMKK', name: 'Kuala Lumpur Intl', city: 'Kuala Lumpur', lat: 2.7456, lon: 101.7099 },
+  { icao: 'WIII', name: 'Soekarno-Hatta Intl', city: 'Jakarta', lat: -6.1256, lon: 106.6558 },
+  { icao: 'RPLL', name: 'Ninoy Aquino Intl', city: 'Manila', lat: 14.5086, lon: 121.0198 },
+  { icao: 'VABB', name: 'Chhatrapati Shivaji Maharaj Intl', city: 'Mumbai', lat: 19.0887, lon: 72.8679 },
+  { icao: 'VIDP', name: 'Indira Gandhi Intl', city: 'Delhi', lat: 28.5562, lon: 77.1000 },
+  { icao: 'YSSY', name: 'Sydney Kingsford Smith', city: 'Sydney', lat: -33.9461, lon: 151.1772 },
+  { icao: 'YMML', name: 'Melbourne Tullamarine', city: 'Melbourne', lat: -37.6733, lon: 144.8433 },
+  { icao: 'NZAA', name: 'Auckland', city: 'Auckland', lat: -37.0082, lon: 174.7850 },
+  { icao: 'FAOR', name: 'O.R. Tambo Intl', city: 'Johannesburg', lat: -26.1392, lon: 28.2460 },
+  { icao: 'HECA', name: 'Cairo Intl', city: 'Cairo', lat: 30.1219, lon: 31.4056 },
+  { icao: 'GMMN', name: 'Mohammed V Intl', city: 'Casablanca', lat: 33.3675, lon: -7.5898 },
+  { icao: 'DNMM', name: 'Murtala Muhammed Intl', city: 'Lagos', lat: 6.5774, lon: 3.3212 },
+  { icao: 'HKJK', name: 'Jomo Kenyatta Intl', city: 'Nairobi', lat: -1.3192, lon: 36.9278 },
+  { icao: 'SBGR', name: 'São Paulo-Guarulhos', city: 'São Paulo', lat: -23.4356, lon: -46.4731 },
+  { icao: 'SCEL', name: 'Arturo Merino Benítez', city: 'Santiago', lat: -33.3930, lon: -70.7858 },
+  { icao: 'SAEZ', name: 'Ministro Pistarini (Ezeiza)', city: 'Buenos Aires', lat: -34.8222, lon: -58.5358 },
+  { icao: 'SKBO', name: 'El Dorado Intl', city: 'Bogotá', lat: 4.7016, lon: -74.1469 },
+  { icao: 'MMMX', name: 'Benito Juárez Intl', city: 'Mexico City', lat: 19.4363, lon: -99.0721 },
+  { icao: 'MMUN', name: 'Cancún Intl', city: 'Cancún', lat: 21.0365, lon: -86.8771 },
+  { icao: 'CYYZ', name: 'Toronto Pearson Intl', city: 'Toronto', lat: 43.6772, lon: -79.6306 },
+  { icao: 'CYVR', name: 'Vancouver Intl', city: 'Vancouver', lat: 49.1947, lon: -123.1839 },
+  { icao: 'CYUL', name: 'Montréal-Trudeau Intl', city: 'Montréal', lat: 45.4706, lon: -73.7408 },
+  { icao: 'CYYC', name: 'Calgary Intl', city: 'Calgary', lat: 51.1315, lon: -114.0106 },
+];
+
+const AIRPORT_MAP = Object.fromEntries(AIRPORTS.map(a => [a.icao, a]));
+
+// ─── GREAT CIRCLE DISTANCE (haversine → NM) ─────────────────────────────────
+function haversineNM(lat1, lon1, lat2, lon2) {
+  const R = 3440.065;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function calcRouteInfo(depIcao, destIcao, aircraftType, windScenario) {
+  const dep = AIRPORT_MAP[depIcao];
+  const dest = AIRPORT_MAP[destIcao];
+  if (!dep || !dest) return null;
+  const distNM = Math.round(haversineNM(dep.lat, dep.lon, dest.lat, dest.lon));
+  const cruiseSpeed = CRUISE_SPEEDS[aircraftType] || 450;
+  const windKt = getWindKt(windScenario);
+  const effectiveSpeed = Math.max(50, cruiseSpeed - windKt);
+  const totalMin = Math.round((distNM / effectiveSpeed) * 60);
+  const burnRate = FUEL_BURN_PER_HOUR[aircraftType];
+  const tripFuelGal = burnRate ? Math.round(burnRate * (totalMin / 60)) : null;
+  return { distance: distNM, hours: Math.floor(totalMin / 60), minutes: totalMin % 60, tripFuelGal };
+}
+
+// ─── THEMED STYLE HELPERS ───────────────────────────────────────────────────
+const mkInputStyle = (t, error) => ({
+  width: '100%', background: t.inputBg,
+  border: `1px solid ${error ? '#c04040' : t.border}`,
+  borderRadius: 2, color: t.text, padding: '7px 10px',
+  fontFamily: "'Share Tech Mono', monospace", fontSize: 14,
+  outline: 'none', transition: 'border-color 0.15s',
+});
+
+const mkSelectStyle = (t) => ({
+  width: '100%', background: t.inputBg,
+  border: `1px solid ${t.border}`, borderRadius: 2,
+  color: t.text, padding: '7px 30px 7px 10px',
+  fontFamily: "'Barlow Condensed', sans-serif", fontSize: 14,
+  outline: 'none', cursor: 'pointer', appearance: 'none',
+  WebkitAppearance: 'none',
+  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a6a85'/%3E%3C/svg%3E")`,
+  backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
+});
+
+// ─── SUB-COMPONENTS ─────────────────────────────────────────────────────────
+
+function InfoTip({ text, t }) {
   const [show, setShow] = useState(false);
   return (
     <span style={{ position: 'relative', display: 'inline-flex', marginLeft: 5 }}>
-      <span
-        onMouseEnter={() => setShow(true)}
-        onMouseLeave={() => setShow(false)}
-        style={{ cursor: 'help', color: '#f0a500', fontSize: 13, lineHeight: 1 }}
-      >ⓘ</span>
+      <span onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}
+        style={{ cursor: 'help', color: t.accent, fontSize: 13, lineHeight: 1 }}>&#9432;</span>
       {show && (
         <span style={{
           position: 'absolute', bottom: '130%', left: '50%',
-          transform: 'translateX(-50%)', background: '#1c2235',
-          color: '#b8c4d8', padding: '8px 12px', borderRadius: 3,
+          transform: 'translateX(-50%)', background: t.tipBg,
+          color: t.tipText, padding: '8px 12px', borderRadius: 3,
           fontSize: 12, width: 240, zIndex: 9999,
-          border: '1px solid #2a3550', lineHeight: 1.6,
-          boxShadow: '0 4px 16px rgba(0,0,0,0.5)', pointerEvents: 'none',
+          border: `1px solid ${t.tipBorder}`, lineHeight: 1.6,
+          boxShadow: `0 4px 16px ${t.shadow}`, pointerEvents: 'none',
           fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 400,
-          letterSpacing: 0,
-        }}>
-          {text}
-        </span>
+        }}>{text}</span>
       )}
     </span>
   );
 }
 
-// ─── FIELD WRAPPER ────────────────────────────────────────────────────────────
-function Field({ label, tip, error, children }) {
+function Field({ label, tip, error, t, children }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <label style={{
         display: 'flex', alignItems: 'center',
         fontSize: 12, fontWeight: 600, letterSpacing: '1.2px',
-        textTransform: 'uppercase', color: '#8a9ab8', marginBottom: 6,
+        textTransform: 'uppercase', color: t.textSec, marginBottom: 6,
         fontFamily: "'Barlow Condensed', sans-serif",
       }}>
-        {label}{tip && <InfoTip text={tip} />}
+        {label}{tip && <InfoTip text={tip} t={t} />}
       </label>
       {children}
       {error && <div style={{ color: '#e05050', fontSize: 11, marginTop: 3, letterSpacing: '0.5px' }}>{error}</div>}
@@ -213,80 +413,57 @@ function Field({ label, tip, error, children }) {
   );
 }
 
-// ─── PANEL WRAPPER ────────────────────────────────────────────────────────────
-function Panel({ num, title, children }) {
+function Panel({ num, title, t, extra, children }) {
   return (
-    <div style={{
-      background: '#141820', border: '1px solid #1e2a3a',
-      borderRadius: 3, overflow: 'hidden',
-    }}>
+    <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
       <div style={{
-        background: '#1a2030', padding: '9px 16px',
-        borderBottom: '1px solid #1e2a3a',
+        background: t.headerBg, padding: '9px 16px',
+        borderBottom: `1px solid ${t.border}`,
         display: 'flex', alignItems: 'center', gap: 10,
       }}>
-        <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#506080' }}>{num}</span>
+        <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: t.textMuted }}>{num}</span>
         <span style={{
           fontFamily: "'Barlow Condensed', sans-serif",
           fontSize: 13, fontWeight: 700, letterSpacing: '2.5px',
-          textTransform: 'uppercase', color: '#aabdd0',
+          textTransform: 'uppercase', color: t.textSec, flex: 1,
         }}>{title}</span>
+        {extra}
       </div>
       <div style={{ padding: 16 }}>{children}</div>
     </div>
   );
 }
 
-// ─── INPUT PRIMITIVES ─────────────────────────────────────────────────────────
-const inputStyle = (error) => ({
-  width: '100%', background: '#0c0f16',
-  border: `1px solid ${error ? '#c04040' : '#1e2a3a'}`,
-  borderRadius: 2, color: '#dde3f0', padding: '7px 10px',
-  fontFamily: "'Share Tech Mono', monospace", fontSize: 14,
-  outline: 'none', transition: 'border-color 0.15s',
-});
-
-const selectStyle = {
-  width: '100%', background: '#0c0f16',
-  border: '1px solid #1e2a3a', borderRadius: 2,
-  color: '#dde3f0', padding: '7px 30px 7px 10px',
-  fontFamily: "'Barlow Condensed', sans-serif", fontSize: 14,
-  outline: 'none', cursor: 'pointer', appearance: 'none',
-  WebkitAppearance: 'none',
-  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%235a6a85'/%3E%3C/svg%3E")`,
-  backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center',
-};
-
-function Suffix({ children }) {
+function Suffix({ t, children }) {
   return (
     <span style={{
-      background: '#1a2030', border: '1px solid #1e2a3a', borderLeft: 'none',
+      background: t.headerBg, border: `1px solid ${t.border}`, borderLeft: 'none',
       borderRadius: '0 2px 2px 0', padding: '7px 10px',
-      fontSize: 12, color: '#7a8fa8', whiteSpace: 'nowrap',
+      fontSize: 12, color: t.textSec, whiteSpace: 'nowrap',
       fontFamily: "'Barlow Condensed', sans-serif", letterSpacing: '0.5px',
     }}>{children}</span>
   );
 }
 
-function InputWithSuffix({ suffix, error, ...props }) {
+function InputWithSuffix({ suffix, error, t, ...props }) {
   return (
     <div style={{ display: 'flex' }}>
-      <input style={{ ...inputStyle(error), borderRight: 'none', borderRadius: '2px 0 0 2px', flex: 1 }} {...props} />
-      <Suffix>{suffix}</Suffix>
+      <input style={{ ...mkInputStyle(t, error), borderRight: 'none', borderRadius: '2px 0 0 2px', flex: 1 }} {...props} />
+      <Suffix t={t}>{suffix}</Suffix>
     </div>
   );
 }
 
-function Toggle({ value, options, onChange }) {
+function Toggle({ value, options, onChange, t }) {
   return (
-    <div style={{ display: 'flex', border: '1px solid #1e2a3a', borderRadius: 2, overflow: 'hidden' }}>
+    <div style={{ display: 'flex', border: `1px solid ${t.border}`, borderRadius: 2, overflow: 'hidden' }}>
       {options.map(o => (
         <button key={o.value} onClick={() => onChange(o.value)} style={{
           flex: 1, border: 'none', cursor: 'pointer', padding: '7px 8px',
           fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12,
           letterSpacing: '0.5px', textTransform: 'uppercase',
-          background: value === o.value ? '#1e2d45' : 'transparent',
-          color: value === o.value ? '#4db8ff' : '#7a8fa8',
+          background: value === o.value ? t.toggleActiveBg : 'transparent',
+          color: value === o.value ? t.toggleActiveText : t.toggleText,
           transition: 'all 0.15s',
         }}>{o.label}</button>
       ))}
@@ -294,31 +471,89 @@ function Toggle({ value, options, onChange }) {
   );
 }
 
-// ─── CUSTOM RECHARTS TOOLTIP ──────────────────────────────────────────────────
-function ChartTip({ active, payload, label, sym }) {
+function Row2({ children }) {
+  return (
+    <div className="avn-row2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{children}</div>
+  );
+}
+
+function AirportCombobox({ value, onChange, error, t, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = (query || value || '').toUpperCase();
+    if (!q) return AIRPORTS.slice(0, 20);
+    return AIRPORTS.filter(a =>
+      a.icao.includes(q) || a.name.toUpperCase().includes(q) || a.city.toUpperCase().includes(q)
+    ).slice(0, 20);
+  }, [query, value]);
+
+  return (
+    <div ref={wrapRef} style={{ position: 'relative' }}>
+      <input
+        ref={inputRef}
+        style={{ ...mkInputStyle(t, error), opacity: disabled ? 0.6 : 1 }}
+        value={value}
+        onChange={e => { setQuery(e.target.value.toUpperCase()); onChange(e.target.value.toUpperCase()); setOpen(true); }}
+        onFocus={() => !disabled && setOpen(true)}
+        maxLength={4}
+        placeholder="ICAO"
+        readOnly={disabled}
+      />
+      {open && !disabled && filtered.length > 0 && (
+        <div style={{
+          position: 'absolute', top: '100%', left: 0, right: 0,
+          background: t.dropdownBg, border: `1px solid ${t.dropdownBorder}`,
+          borderRadius: '0 0 3px 3px', maxHeight: 200, overflowY: 'auto',
+          zIndex: 9999, boxShadow: `0 8px 24px ${t.shadow}`,
+        }}>
+          {filtered.map(a => (
+            <div key={a.icao}
+              onMouseDown={() => { onChange(a.icao); setQuery(''); setOpen(false); inputRef.current?.blur(); }}
+              style={{
+                padding: '6px 10px', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 8,
+                borderBottom: `1px solid ${t.headerBg}`, transition: 'background 0.1s',
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = t.dropdownHover}
+              onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+            >
+              <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 13, color: t.accent, minWidth: 42 }}>{a.icao}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, color: t.textSec, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name} — {a.city}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChartTip({ active, payload, label, sym, t }) {
   if (!active || !payload?.length) return null;
   return (
-    <div style={{
-      background: '#1a2030', border: '1px solid #2a3550',
-      borderRadius: 3, padding: '8px 12px',
-      fontFamily: "'Share Tech Mono', monospace", fontSize: 11,
-    }}>
-      <div style={{ color: '#8090b0', marginBottom: 4 }}>{label}</div>
-      {payload.map(p => (
-        <div key={p.name} style={{ color: p.color }}>
-          {p.name}: {sym}{p.value?.toLocaleString()}
-        </div>
-      ))}
+    <div style={{ background: t.headerBg, border: `1px solid ${t.dropdownBorder}`, borderRadius: 3, padding: '8px 12px', fontFamily: "'Share Tech Mono', monospace", fontSize: 11 }}>
+      <div style={{ color: t.textSec, marginBottom: 4 }}>{label}</div>
+      {payload.map(p => <div key={p.name} style={{ color: p.color }}>{p.name}: {sym}{p.value?.toLocaleString()}</div>)}
     </div>
   );
 }
 
 // ─── RESULTS PANEL ────────────────────────────────────────────────────────────
-function ResultsPanel({ res, inp, sym }) {
+function ResultsPanel({ res, leg, shared, sym, t, legIndex, totalLegs }) {
   const { maxTanker, optTanker, burnPenalty, grossSav, costCarry,
           feeAdj, netSav, breakEvenDelta, actualDelta, sensitivityData } = res;
-  const unit = inp.fuelUnit;
-
+  const unit = shared.fuelUnit;
   const fmtN = (n, d = 0) => n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
   const fmtU = (n) => `${fmtN(n, 1)} ${unit}`;
   const fmtC = (n, d = 2) => `${n < 0 ? '-' : ''}${sym}${fmtN(Math.abs(n), d)}`;
@@ -328,56 +563,38 @@ function ResultsPanel({ res, inp, sym }) {
   else if (netSav < 200 || (grossSav > 0 && netSav / grossSav < 0.05)) status = 'marginal';
 
   const badgeCfg = {
-    go:       { bg: '#0a1e10', border: '#28a048', color: '#38d068', icon: '✓', label: 'TANKER FUEL',       sub: 'ECONOMICALLY ADVANTAGEOUS' },
-    'no-go':  { bg: '#1e0a0a', border: '#a02828', color: '#e04040', icon: '✗', label: 'DO NOT TANKER',    sub: 'NOT ECONOMICALLY JUSTIFIED' },
-    marginal: { bg: '#1e160a', border: '#b07020', color: '#f0a500', icon: '⚠', label: 'MARGINAL — REVIEW', sub: 'NEAR BREAK-EVEN THRESHOLD' },
+    go:       { bg: '#0a1e10', border: '#28a048', color: '#38d068', icon: '\u2713', label: 'TANKER FUEL',       sub: 'ECONOMICALLY ADVANTAGEOUS' },
+    'no-go':  { bg: '#1e0a0a', border: '#a02828', color: '#e04040', icon: '\u2717', label: 'DO NOT TANKER',    sub: 'NOT ECONOMICALLY JUSTIFIED' },
+    marginal: { bg: '#1e160a', border: '#b07020', color: '#f0a500', icon: '\u26A0', label: 'MARGINAL',          sub: 'NEAR BREAK-EVEN THRESHOLD' },
   };
   const bc = badgeCfg[status];
 
   const dataRows = [
-    { label: 'Max Tankerable Fuel',       val: fmtU(maxTanker),         highlight: false },
-    { label: 'Recommended Tanker Amount', val: fmtU(optTanker),         highlight: true  },
-    { label: 'Fuel Burn Penalty',         val: fmtU(burnPenalty),       highlight: false },
-    { label: 'Gross Savings',             val: fmtC(grossSav),          color: '#38d068' },
-    { label: 'Cost of Tankering',         val: `−${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
-    { label: 'Fee Adjustment',            val: fmtC(feeAdj),            color: feeAdj >= 0 ? '#38d068' : '#e04040' },
-    { label: 'Break-Even Price Delta',    val: `${sym}${fmtN(breakEvenDelta,4)}/${unit}`, highlight: false },
-    { label: 'Actual Price Differential', val: `${sym}${fmtN(actualDelta,4)}/${unit}`,
-      color: actualDelta > breakEvenDelta ? '#38d068' : '#e04040' },
+    { label: 'Max Tankerable Fuel',       val: fmtU(maxTanker) },
+    { label: 'Recommended Tanker Amount', val: fmtU(optTanker), highlight: true },
+    { label: 'Fuel Burn Penalty',         val: fmtU(burnPenalty) },
+    { label: 'Gross Savings',             val: fmtC(grossSav), color: '#38d068' },
+    { label: 'Cost of Tankering',         val: `\u2212${sym}${fmtN(costCarry,2)}`, color: '#e04040' },
+    { label: 'Fee Adjustment',            val: fmtC(feeAdj), color: feeAdj >= 0 ? '#38d068' : '#e04040' },
+    { label: 'Break-Even Delta',          val: `${sym}${fmtN(breakEvenDelta,4)}/${unit}` },
+    { label: 'Actual Price Diff',         val: `${sym}${fmtN(actualDelta,4)}/${unit}`, color: actualDelta > breakEvenDelta ? '#38d068' : '#e04040' },
   ];
 
   const barData = [
-    { name: 'GROSS SAVINGS', value: Math.round(grossSav),  fill: '#28a048' },
-    { name: 'CARRY COST',    value: Math.round(costCarry), fill: '#a02828' },
-    { name: 'NET SAVINGS',   value: Math.round(netSav),    fill: netSav >= 0 ? '#f0a500' : '#c03030' },
+    { name: 'GROSS', value: Math.round(grossSav), fill: '#28a048' },
+    { name: 'CARRY',  value: Math.round(costCarry), fill: '#a02828' },
+    { name: 'NET',    value: Math.round(netSav), fill: netSav >= 0 ? '#f0a500' : '#c03030' },
   ];
 
-  const summary = status === 'no-go'
-    ? `ASSESSMENT: At current prices, tankering from ${inp.departure} to ${inp.destination} is NOT economically justified. The price differential of ${sym}${fmtN(actualDelta,4)}/${unit} is below the break-even threshold of ${sym}${fmtN(breakEvenDelta,4)}/${unit}. Recommend standard fuel load only.`
-    : `ASSESSMENT: Tankering ${fmtN(optTanker,0)} ${unit} from ${inp.departure} to ${inp.destination} yields a net saving of ${fmtC(netSav)} after accounting for the ${fmtN(burnPenalty,0)} ${unit} burn penalty (${fmtC(costCarry)} cost to carry). Price differential of ${sym}${fmtN(actualDelta,4)}/${unit} exceeds the break-even threshold of ${sym}${fmtN(breakEvenDelta,4)}/${unit}.`;
+  const legLabel = totalLegs > 1 ? ` — LEG ${legIndex + 1}: ${leg.departure} \u2192 ${leg.destination}` : '';
 
   return (
-    <div style={{
-      gridColumn: '1 / -1',
-      background: '#141820', border: '1px solid #1e2a3a', borderRadius: 3, overflow: 'hidden',
-    }}>
-      {/* Header */}
-      <div style={{
-        background: '#1a2030', padding: '12px 20px',
-        borderBottom: '1px solid #1e2a3a',
-        display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap',
-      }}>
-        <div style={{
-          fontFamily: "'Barlow Condensed', sans-serif",
-          fontSize: 13, fontWeight: 700, letterSpacing: '3px',
-          textTransform: 'uppercase', color: '#8a9ab8',
-        }}>DECISION READOUT</div>
-
-        <div style={{
-          background: bc.bg, border: `2px solid ${bc.border}`,
-          borderRadius: 3, padding: '6px 18px',
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
+    <div style={{ gridColumn: '1 / -1', background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+      <div style={{ background: t.headerBg, padding: '12px 20px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: t.textSec }}>
+          DECISION READOUT{legLabel}
+        </div>
+        <div style={{ background: bc.bg, border: `2px solid ${bc.border}`, borderRadius: 3, padding: '6px 18px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 22, color: bc.color }}>{bc.icon}</span>
           <div>
             <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 17, fontWeight: 700, letterSpacing: '2px', color: bc.color }}>{bc.label}</div>
@@ -386,61 +603,32 @@ function ResultsPanel({ res, inp, sym }) {
         </div>
       </div>
 
-      {/* Data + Bar Chart */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
-
-        {/* Data Table */}
-        <div style={{ borderRight: '1px solid #1e2a3a' }}>
+      <div className="avn-data-split" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+        <div style={{ borderRight: `1px solid ${t.border}` }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <tbody>
               {dataRows.map((row, i) => (
-                <tr key={i} style={{ borderBottom: '1px solid #131a28' }}>
-                  <td style={{
-                    padding: '9px 16px', fontSize: 12, fontWeight: 600,
-                    letterSpacing: '0.8px', textTransform: 'uppercase', color: '#8090b8',
-                    fontFamily: "'Barlow Condensed', sans-serif", width: '56%',
-                  }}>{row.label}</td>
-                  <td style={{
-                    padding: '9px 16px', textAlign: 'right',
-                    fontFamily: "'Share Tech Mono', monospace",
-                    fontSize: row.highlight ? 14 : 13,
-                    color: row.color || (row.highlight ? '#f0a500' : '#ccd4e8'),
-                  }}>{row.val}</td>
+                <tr key={i} style={{ borderBottom: `1px solid ${t.rowBorder}` }}>
+                  <td style={{ padding: '9px 16px', fontSize: 12, fontWeight: 600, letterSpacing: '0.8px', textTransform: 'uppercase', color: t.textSec, fontFamily: "'Barlow Condensed', sans-serif", width: '56%' }}>{row.label}</td>
+                  <td style={{ padding: '9px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: row.highlight ? 14 : 13, color: row.color || (row.highlight ? t.accent : t.text) }}>{row.val}</td>
                 </tr>
               ))}
-              {/* NET SAVINGS — prominent row */}
-              <tr style={{ background: '#1a2030' }}>
-                <td style={{
-                  padding: '13px 16px', fontSize: 13, fontWeight: 700,
-                  letterSpacing: '2px', textTransform: 'uppercase', color: '#b0c0d8',
-                  fontFamily: "'Barlow Condensed', sans-serif",
-                }}>NET SAVINGS</td>
-                <td style={{
-                  padding: '13px 16px', textAlign: 'right',
-                  fontFamily: "'Share Tech Mono', monospace",
-                  fontSize: 22, fontWeight: 700,
-                  color: netSav >= 0 ? '#38d068' : '#e04040',
-                }}>{fmtC(netSav)}</td>
+              <tr style={{ background: t.headerBg }}>
+                <td style={{ padding: '13px 16px', fontSize: 13, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.text, fontFamily: "'Barlow Condensed', sans-serif" }}>NET SAVINGS</td>
+                <td style={{ padding: '13px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 22, fontWeight: 700, color: netSav >= 0 ? '#38d068' : '#e04040' }}>{fmtC(netSav)}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-        {/* Bar Chart */}
         <div style={{ padding: '16px 16px 8px' }}>
-          <div style={{
-            fontFamily: "'Barlow Condensed', sans-serif",
-            fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase',
-            color: '#3a4a65', marginBottom: 10,
-          }}>SAVINGS BREAKDOWN</div>
+          <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>SAVINGS BREAKDOWN</div>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={barData} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1a2535" vertical={false} />
-              <XAxis dataKey="name" tick={{ fill: '#6a7a90', fontSize: 10, fontFamily: 'Share Tech Mono' }} axisLine={{ stroke: '#1e2a3a' }} tickLine={false} />
-              <YAxis tick={{ fill: '#6a7a90', fontSize: 10, fontFamily: 'Share Tech Mono' }}
-                tickFormatter={v => `${sym}${(v/1000).toFixed(0)}k`}
-                axisLine={false} tickLine={false} />
-              <RCTooltip content={<ChartTip sym={sym} />} />
+              <CartesianGrid strokeDasharray="3 3" stroke={t.chartGrid} vertical={false} />
+              <XAxis dataKey="name" tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }} axisLine={{ stroke: t.chartAxisLine }} tickLine={false} />
+              <YAxis tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }} tickFormatter={v => `${sym}${(v/1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+              <RCTooltip content={<ChartTip sym={sym} t={t} />} />
               <Bar dataKey="value" radius={[2, 2, 0, 0]}>
                 {barData.map((entry, i) => <Cell key={i} fill={entry.fill} />)}
               </Bar>
@@ -449,118 +637,283 @@ function ResultsPanel({ res, inp, sym }) {
         </div>
       </div>
 
-      {/* Sensitivity Line Chart */}
-      <div style={{ padding: '16px 20px', borderTop: '1px solid #131a28' }}>
-        <div style={{
-          fontFamily: "'Barlow Condensed', sans-serif",
-          fontSize: 12, letterSpacing: '2px', textTransform: 'uppercase',
-          color: '#6a7a95', marginBottom: 10,
-        }}>SENSITIVITY ANALYSIS — NET SAVINGS vs TANKERED FUEL AMOUNT ({unit.toUpperCase()})</div>
-        <ResponsiveContainer width="100%" height={200}>
+      <div style={{ padding: '16px 20px', borderTop: `1px solid ${t.rowBorder}` }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>
+          SENSITIVITY — NET SAVINGS vs TANKERED FUEL ({unit.toUpperCase()})
+        </div>
+        <ResponsiveContainer width="100%" height={180}>
           <LineChart data={sensitivityData} margin={{ top: 4, right: 24, left: 12, bottom: 20 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#1a2535" />
-            <XAxis dataKey="tanker"
-              tick={{ fill: '#6a7a90', fontSize: 10, fontFamily: 'Share Tech Mono' }}
+            <CartesianGrid strokeDasharray="3 3" stroke={t.chartGrid} />
+            <XAxis dataKey="tanker" tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }}
               tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v}
-              axisLine={{ stroke: '#1e2a3a' }} tickLine={false}
-              label={{ value: `Tankered Fuel (${unit})`, position: 'insideBottom', offset: -14, fill: '#3a4a65', fontSize: 10, fontFamily: 'Share Tech Mono' }} />
-            <YAxis tick={{ fill: '#6a7a90', fontSize: 10, fontFamily: 'Share Tech Mono' }}
-              tickFormatter={v => `${sym}${(v/1000).toFixed(0)}k`}
-              axisLine={false} tickLine={false} />
-            <RCTooltip content={<ChartTip sym={sym} />} />
-            <Legend
-              wrapperStyle={{ paddingTop: 8, fontFamily: 'Share Tech Mono', fontSize: 10, color: '#5a6a80' }}
-              formatter={n => n} />
-            <ReferenceLine y={0} stroke="#2a3a50" strokeDasharray="4 4" />
+              axisLine={{ stroke: t.chartAxisLine }} tickLine={false} />
+            <YAxis tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }}
+              tickFormatter={v => `${sym}${(v/1000).toFixed(0)}k`} axisLine={false} tickLine={false} />
+            <RCTooltip content={<ChartTip sym={sym} t={t} />} />
+            <ReferenceLine y={0} stroke={t.border} strokeDasharray="4 4" />
             <Line type="monotone" dataKey="grossSavings" name="Gross Savings" stroke="#28a048" strokeWidth={1.5} dot={false} />
             <Line type="monotone" dataKey="costToCarry"  name="Cost to Carry" stroke="#a02828" strokeWidth={1.5} dot={false} />
             <Line type="monotone" dataKey="netSavings"   name="Net Savings"   stroke="#f0a500" strokeWidth={2}   dot={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
-
-      {/* Summary */}
-      <div style={{ padding: '14px 20px 18px', borderTop: '1px solid #131a28', background: '#0f1219' }}>
-        <div style={{
-          fontFamily: "'Barlow Condensed', sans-serif",
-          fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase',
-          color: '#506070', marginBottom: 8,
-        }}>SYSTEM ASSESSMENT</div>
-        <div style={{
-          fontFamily: "'Share Tech Mono', monospace",
-          fontSize: 13, color: '#9aaabb', lineHeight: 1.9,
-          borderLeft: `3px solid ${bc.border}`, paddingLeft: 14,
-        }}>{summary}</div>
-      </div>
     </div>
   );
 }
 
-// ─── LAYOUT HELPERS ──────────────────────────────────────────────────────────
-function Row2({ children }) {
+// ─── LEG CARD ────────────────────────────────────────────────────────────────
+function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveLeg, t }) {
+  const unit = shared.fuelUnit;
+  const sym = CURRENCY_SYMBOLS[shared.currency] || '$';
+  const setL = (k, v) => onUpdateLeg(index, k, v);
+  const setLNum = (k, raw) => onUpdateLeg(index, k, raw === '' ? '' : +raw);
+  const selectStyle = mkSelectStyle(t);
+
+  const removeBtn = totalLegs > 1 ? (
+    <button onClick={() => onRemoveLeg(index)} style={{
+      background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 2,
+      color: '#e04040', cursor: 'pointer', padding: '2px 8px',
+      fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '1px',
+    }}>&times; REMOVE</button>
+  ) : null;
+
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{children}</div>
+    <Panel num={String(index + 1).padStart(2, '0')} title={`Leg ${index + 1}: ${leg.departure || '?'} \u2192 ${leg.destination || '?'}`} t={t} extra={removeBtn}>
+      {/* Route */}
+      <Row2>
+        <Field label={index === 0 ? 'Departure' : 'Departure (from prev leg)'} error={errors[`dep_${index}`]} t={t}>
+          <AirportCombobox value={leg.departure} onChange={v => setL('departure', v)} error={errors[`dep_${index}`]} t={t} disabled={index > 0} />
+        </Field>
+        <Field label="Destination" error={errors[`dest_${index}`]} t={t}>
+          <AirportCombobox value={leg.destination} onChange={v => setL('destination', v)} error={errors[`dest_${index}`]} t={t} />
+        </Field>
+      </Row2>
+
+      <Row2>
+        <Field label="Distance" t={t}>
+          <InputWithSuffix type="number" suffix="NM" value={leg.distance} onChange={e => setLNum('distance', e.target.value)} t={t} />
+        </Field>
+        <Field label="Wind Conditions" t={t}>
+          <div className="avn-select-wrap">
+            <select style={selectStyle} value={leg.windScenario} onChange={e => setL('windScenario', e.target.value)}>
+              {WIND_SCENARIOS.map(w => (
+                <option key={w.value} value={w.value}>{w.label} ({w.kt >= 0 ? '+' : ''}{w.kt} kt)</option>
+              ))}
+            </select>
+          </div>
+        </Field>
+      </Row2>
+
+      <Field label="Est. Flight Time" t={t}>
+        <Row2>
+          <InputWithSuffix type="number" suffix="HR" min={0} max={24} value={leg.flightHours} onChange={e => setLNum('flightHours', e.target.value)} t={t} />
+          <InputWithSuffix type="number" suffix="MIN" min={0} max={59} value={leg.flightMinutes} onChange={e => setLNum('flightMinutes', e.target.value)} t={t} />
+        </Row2>
+      </Field>
+
+      <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors[`trip_${index}`]} t={t}>
+        <input style={mkInputStyle(t, errors[`trip_${index}`])} type="number" value={leg.tripFuel} onChange={e => setLNum('tripFuel', e.target.value)} />
+      </Field>
+
+      {/* Pricing */}
+      <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 12 }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>FUEL PRICING</div>
+        <Row2>
+          <Field label={`Price — Dep (${sym}/${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.priceDep} onChange={e => setLNum('priceDep', e.target.value)} />
+          </Field>
+          <Field label={`Price — Dest (${sym}/${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.priceDest} onChange={e => setLNum('priceDest', e.target.value)} />
+          </Field>
+        </Row2>
+        <Row2>
+          <Field label={`Into-Plane — Dep (${sym}/${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.upliftDep} onChange={e => setLNum('upliftDep', e.target.value)} />
+          </Field>
+          <Field label={`Into-Plane — Dest (${sym}/${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.upliftDest} onChange={e => setLNum('upliftDest', e.target.value)} />
+          </Field>
+        </Row2>
+        <Row2>
+          <Field label={`Min Purchase (${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" value={leg.minPurchaseReq} onChange={e => setLNum('minPurchaseReq', e.target.value)} />
+          </Field>
+          <Field label={`Ramp Fee (${sym})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" value={leg.rampFee} onChange={e => setLNum('rampFee', e.target.value)} />
+          </Field>
+        </Row2>
+      </div>
+
+      {/* Regulatory per-leg */}
+      <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 12 }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>REGULATORY</div>
+        <Row2>
+          <Field label="Alternate Required?" t={t}>
+            <Toggle value={leg.altRequired ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL('altRequired', v === 'yes')} t={t} />
+          </Field>
+          <Field label="International?" t={t}>
+            <Toggle value={leg.intlFlight ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL('intlFlight', v === 'yes')} t={t} />
+          </Field>
+        </Row2>
+        {leg.altRequired && (
+          <Field label={`Alternate Fuel (${unit})`} t={t}>
+            <input style={mkInputStyle(t)} type="number" value={leg.altFuel} onChange={e => setLNum('altFuel', e.target.value)} />
+          </Field>
+        )}
+        <Row2>
+          <Field label="Contingency (%)" t={t}>
+            <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={leg.contingencyPct} onChange={e => setLNum('contingencyPct', e.target.value)} t={t} />
+          </Field>
+          <Field label="Tax Differential (%)" t={t}>
+            <InputWithSuffix type="number" suffix="%" min={0} max={50} step={0.5} value={leg.taxDiffPct} onChange={e => setLNum('taxDiffPct', e.target.value)} t={t} />
+          </Field>
+        </Row2>
+      </div>
+    </Panel>
   );
 }
 
 // ─── MAIN COMPONENT ───────────────────────────────────────────────────────────
 export default function TankeringTool() {
-  const [inp, setInp] = useState({ ...DEFAULTS });
+  const [state, setState] = useState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
   const [results, setResults] = useState(null);
-  const [errors,  setErrors]  = useState({});
+  const [errors, setErrors] = useState({});
   const [unitSys, setUnitSys] = useState('imperial');
+  const [theme, setTheme] = useState('dark');
+  const t = THEMES[theme];
 
-  const set = useCallback((k, v) => setInp(p => ({ ...p, [k]: v })), []);
+  const unit = state.fuelUnit;
+  const sym = CURRENCY_SYMBOLS[state.currency] || '$';
+
+  const setShared = useCallback((k, v) => setState(p => ({ ...p, [k]: v })), []);
+  const setSharedNum = useCallback((k, raw) => setState(p => ({ ...p, [k]: raw === '' ? '' : +raw })), []);
+
+  const updateLeg = useCallback((index, key, value) => {
+    setState(prev => {
+      const legs = [...prev.legs];
+      legs[index] = { ...legs[index], [key]: value };
+      if (key === 'destination' && index < legs.length - 1) {
+        legs[index + 1] = { ...legs[index + 1], departure: value };
+      }
+      return { ...prev, legs };
+    });
+  }, []);
+
+  const addLeg = useCallback(() => {
+    setState(prev => {
+      const lastDest = prev.legs[prev.legs.length - 1].destination;
+      return { ...prev, legs: [...prev.legs, createLeg(lastDest)] };
+    });
+  }, []);
+
+  const removeLeg = useCallback((index) => {
+    setState(prev => {
+      if (prev.legs.length <= 1) return prev;
+      const legs = prev.legs.filter((_, i) => i !== index);
+      for (let i = 1; i < legs.length; i++) {
+        legs[i] = { ...legs[i], departure: legs[i - 1].destination };
+      }
+      return { ...prev, legs };
+    });
+  }, []);
+
+  const handleAircraftType = useCallback((type) => {
+    setState(prev => {
+      const preset = AIRCRAFT_PRESETS[type];
+      if (!preset) return { ...prev, aircraftType: type };
+      const convert = (v) => Math.round(fromLbs(toLbs(v, 'gal'), prev.fuelUnit));
+      return {
+        ...prev,
+        aircraftType: type,
+        mtow: convert(preset.mtow),
+        zfw: convert(preset.zfw),
+        minLandingFuel: convert(preset.minLandingFuel),
+        burnPenaltyRate: preset.burnPenaltyRate,
+        legs: prev.legs.map(leg => ({ ...leg, altFuel: convert(preset.altFuel) })),
+      };
+    });
+  }, []);
+
+  // Auto-calculate route info and trip fuel for each leg
+  useEffect(() => {
+    setState(prev => {
+      let changed = false;
+      const newLegs = prev.legs.map(leg => {
+        const info = calcRouteInfo(leg.departure, leg.destination, prev.aircraftType, leg.windScenario);
+        if (!info) return leg;
+        const updates = {};
+        if (leg.distance !== info.distance) updates.distance = info.distance;
+        if (leg.flightHours !== info.hours) updates.flightHours = info.hours;
+        if (leg.flightMinutes !== info.minutes) updates.flightMinutes = info.minutes;
+        if (info.tripFuelGal != null) {
+          const est = Math.round(fromLbs(toLbs(info.tripFuelGal, 'gal'), prev.fuelUnit));
+          if (leg.tripFuel === '' || leg.tripFuel !== est) updates.tripFuel = est;
+        }
+        if (Object.keys(updates).length === 0) return leg;
+        changed = true;
+        return { ...leg, ...updates };
+      });
+      return changed ? { ...prev, legs: newLegs } : prev;
+    });
+  }, [
+    state.legs.map(l => `${l.departure}|${l.destination}|${l.windScenario}`).join(','),
+    state.aircraftType,
+  ]);
 
   const handleUnitSys = useCallback((sys) => {
     if (sys === unitSys) return;
     const targetUnit = sys === 'metric' ? 'liters' : 'gal';
-    setInp(p => {
-      const newUnit = targetUnit;
-      const convert = (v) => Math.round(fromLbs(toLbs(v, p.fuelUnit), newUnit));
+    setState(prev => {
+      const convert = (v) => v === '' ? '' : Math.round(fromLbs(toLbs(v, prev.fuelUnit), targetUnit));
       return {
-        ...p,
-        mtow:          convert(p.mtow),
-        zfw:           convert(p.zfw),
-        tripFuel:      convert(p.tripFuel),
-        minLandingFuel:convert(p.minLandingFuel),
-        altFuel:       convert(p.altFuel),
-        minPurchaseReq:convert(p.minPurchaseReq),
-        weightUnit:    newUnit,
-        fuelUnit:      newUnit,
+        ...prev,
+        mtow: convert(prev.mtow),
+        zfw: convert(prev.zfw),
+        minLandingFuel: convert(prev.minLandingFuel),
+        fuelUnit: targetUnit,
+        legs: prev.legs.map(leg => ({
+          ...leg,
+          tripFuel: convert(leg.tripFuel),
+          altFuel: convert(leg.altFuel),
+          minPurchaseReq: convert(leg.minPurchaseReq),
+        })),
       };
     });
     setUnitSys(sys);
   }, [unitSys]);
 
   const handleRun = useCallback(() => {
-    const errs = validate(inp);
-    setErrors(errs);
-    if (Object.keys(errs).length) return;
-    setResults(runCalc(inp));
-  }, [inp]);
+    let allErrors = {};
+    state.legs.forEach((leg, i) => {
+      Object.assign(allErrors, validateLeg(state, leg, i));
+    });
+    setErrors(allErrors);
+    if (Object.keys(allErrors).length) { setResults(null); return; }
+    const legResults = state.legs.map(leg => runCalc(state, leg));
+    setResults(legResults);
+  }, [state]);
 
   const handleReset = useCallback(() => {
-    setInp({ ...DEFAULTS });
+    setState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
     setResults(null);
     setErrors({});
     setUnitSys('imperial');
   }, []);
 
-  const sym  = CURRENCY_SYMBOLS[inp.currency] || '$';
-  const unit = inp.fuelUnit;
+  const totalNetSavings = results ? results.reduce((sum, r) => sum + r.netSav, 0) : 0;
+  const selectStyle = mkSelectStyle(t);
 
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;500;600;700&display=swap');
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: #0c0f16; }
+        body { background: ${t.pageBg}; }
         input[type=number]::-webkit-inner-spin-button,
         input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
-        input:focus, select:focus { border-color: #f0a500 !important; }
-        input[type=range] { accent-color: #f0a500; }
+        input:focus, select:focus { border-color: ${t.accent} !important; }
+        input[type=range] { accent-color: ${t.accent}; }
         .avn-select-wrap { position: relative; }
         .avn-select-wrap::after {
           content: '';
@@ -571,186 +924,98 @@ export default function TankeringTool() {
         @media (max-width: 860px) {
           .avn-grid { grid-template-columns: 1fr !important; }
           .avn-data-split { grid-template-columns: 1fr !important; }
+          .avn-row2 { grid-template-columns: 1fr !important; }
+          .avn-header { flex-direction: column !important; align-items: flex-start !important; }
+          .avn-header-controls { width: 100%; justify-content: space-between !important; }
+        }
+        @media (max-width: 480px) {
+          .avn-grid { padding: 10px 12px !important; gap: 10px !important; }
+          .avn-header { padding: 10px 12px !important; }
         }
       `}</style>
 
-      <div style={{
-        minHeight: '100vh', background: '#0c0f16',
-        color: '#c0cad8', fontFamily: "'Barlow Condensed', sans-serif",
-      }}>
-        {/* ── HEADER ── */}
-        <div style={{
-          background: 'linear-gradient(180deg,#141c28 0%,#0c0f16 100%)',
-          borderBottom: '1px solid #1e2a3a',
+      <div style={{ minHeight: '100vh', background: t.pageBg, color: t.text, fontFamily: "'Barlow Condensed', sans-serif" }}>
+        {/* HEADER */}
+        <div className="avn-header" style={{
+          background: t.headerGrad, borderBottom: `1px solid ${t.border}`,
           padding: '14px 24px',
           display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
         }}>
           <div>
-            <div style={{
-              fontFamily: "'Barlow Condensed', sans-serif",
-              fontSize: 22, fontWeight: 700, letterSpacing: '4px',
-              textTransform: 'uppercase', color: '#f0a500',
-            }}>TANKER FUEL DECISION TOOL</div>
-            <div style={{
-              fontSize: 11, letterSpacing: '2.5px', color: '#506880',
-              textTransform: 'uppercase', marginTop: 2,
-            }}>Aviation Fuel Optimization System · Flight Operations</div>
+            <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '4px', textTransform: 'uppercase', color: t.accent }}>
+              TANKER FUEL DECISION TOOL
+            </div>
+            <div style={{ fontSize: 11, letterSpacing: '2.5px', color: t.textMuted, textTransform: 'uppercase', marginTop: 2 }}>
+              Aviation Fuel Optimization System
+            </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 11, letterSpacing: '1.5px', color: '#6a7a90', textTransform: 'uppercase' }}>Unit System</span>
-            <Toggle
-              value={unitSys}
-              options={[{ value: 'imperial', label: 'Imperial' }, { value: 'metric', label: 'Metric' }]}
-              onChange={handleUnitSys}
-            />
+          <div className="avn-header-controls" style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, letterSpacing: '1.5px', color: t.textMuted, textTransform: 'uppercase' }}>Theme</span>
+              <Toggle value={theme} options={[{ value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }]} onChange={setTheme} t={t} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, letterSpacing: '1.5px', color: t.textMuted, textTransform: 'uppercase' }}>Units</span>
+              <Toggle value={unitSys} options={[{ value: 'imperial', label: 'Imperial' }, { value: 'metric', label: 'Metric' }]} onChange={handleUnitSys} t={t} />
+            </div>
           </div>
         </div>
 
-        {/* ── PANELS GRID ── */}
-        <div className="avn-grid" style={{
-          maxWidth: 1400, margin: '0 auto', padding: '20px 24px',
-          display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14,
-        }}>
+        {/* PANELS GRID */}
+        <div className="avn-grid" style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
 
-          {/* ── PANEL 1: ROUTE & AIRCRAFT ── */}
-          <Panel num="01" title="Route & Aircraft">
-            <Row2>
-              <Field label="Departure Airport" error={errors.departure}>
-                <input style={inputStyle(errors.departure)} value={inp.departure}
-                  onChange={e => set('departure', e.target.value.toUpperCase())} maxLength={4} />
-              </Field>
-              <Field label="Destination Airport" error={errors.destination}>
-                <input style={inputStyle(errors.destination)} value={inp.destination}
-                  onChange={e => set('destination', e.target.value.toUpperCase())} maxLength={4} />
-              </Field>
-            </Row2>
-
-            <Field label="Aircraft / Vehicle Type">
+          {/* SHARED: AIRCRAFT & WEIGHT */}
+          <Panel num="AC" title="Aircraft & Weight" t={t}>
+            <Field label="Aircraft / Vehicle Type" t={t}>
               <div className="avn-select-wrap">
-                <select style={selectStyle} value={inp.aircraftType} onChange={e => set('aircraftType', e.target.value)}>
-                  <option value="narrow">Narrow-body Jet (e.g. B737 / A320)</option>
-                  <option value="wide">Wide-body Jet (e.g. B777 / A350)</option>
-                  <option value="bizjet">Business Jet (e.g. G650 / Challenger)</option>
-                  <option value="turboprop">Turboprop (e.g. King Air)</option>
-                  <option value="helicopter">Helicopter (e.g. AW139 / S-76)</option>
+                <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
+                  <option value="">— Select Aircraft —</option>
+                  <option value="narrow">Narrow-body (B737 / A320)</option>
+                  <option value="wide">Wide-body (B777 / A350)</option>
+                  <option value="bizjet">Business Jet (G650 / Challenger)</option>
+                  <option value="turboprop">Turboprop (King Air)</option>
+                  <option value="helicopter">Helicopter (AW139 / S-76)</option>
                   <option value="custom">Custom</option>
                 </select>
               </div>
             </Field>
 
-            <Row2>
-              <Field label="Route Distance">
-                <InputWithSuffix type="number" suffix="NM" value={inp.distance} onChange={e => set('distance', +e.target.value)} />
-              </Field>
-              <Field label="Wind Component" tip="Positive = headwind, negative = tailwind. Affects fuel burn estimation but does not auto-adjust trip fuel — enter actual planned fuel from your OFP.">
-                <InputWithSuffix type="number" suffix="kt HW+" value={inp.windComponent} onChange={e => set('windComponent', +e.target.value)} />
-              </Field>
-            </Row2>
-
-            <Field label="Estimated Flight Time">
-              <Row2>
-                <InputWithSuffix type="number" suffix="HR"  min={0} max={24} value={inp.flightHours}   onChange={e => set('flightHours',   +e.target.value)} />
-                <InputWithSuffix type="number" suffix="MIN" min={0} max={59} value={inp.flightMinutes} onChange={e => set('flightMinutes', +e.target.value)} />
-              </Row2>
-            </Field>
-          </Panel>
-
-          {/* ── PANEL 2: WEIGHT & PERFORMANCE ── */}
-          <Panel num="02" title="Weight & Performance">
-            <Field label="Fuel / Weight Unit">
-              <Toggle
-                value={inp.fuelUnit}
-                options={[{ value:'lbs',label:'LBS' },{ value:'kg',label:'KG' },{ value:'gal',label:'GAL' },{ value:'liters',label:'LITERS' }]}
-                onChange={v => set('fuelUnit', v)}
-              />
+            <Field label="Fuel / Weight Unit" t={t}>
+              <Toggle value={unit} options={[{ value:'lbs',label:'LBS' },{ value:'kg',label:'KG' },{ value:'gal',label:'GAL' },{ value:'liters',label:'LITERS' }]} onChange={v => setShared('fuelUnit', v)} t={t} />
             </Field>
 
             <Row2>
-              <Field label={`MTOW (${unit})`}
-                tip="Maximum Takeoff Weight — the maximum certified takeoff weight per the aircraft Type Certificate or AFM. Hard structural/performance limit."
-                error={errors.mtow}>
-                <input style={inputStyle(errors.mtow)} type="number" value={inp.mtow} onChange={e => set('mtow', +e.target.value)} />
+              <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight" error={errors.mtow} t={t}>
+                <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
               </Field>
-              <Field label={`ZFW (${unit})`}
-                tip="Zero Fuel Weight — aircraft operating empty weight plus all payload (passengers, bags, cargo, crew). Excludes all fuel. The loaded aircraft weight before fueling begins."
-                error={errors.zfw}>
-                <input style={inputStyle(errors.zfw)} type="number" value={inp.zfw} onChange={e => set('zfw', +e.target.value)} />
+              <Field label={`ZFW (${unit})`} tip="Zero Fuel Weight" error={errors.zfw} t={t}>
+                <input style={mkInputStyle(t, errors.zfw)} type="number" value={state.zfw} onChange={e => setSharedNum('zfw', e.target.value)} />
               </Field>
             </Row2>
 
-            <Field label={`Trip Fuel Required (${unit})`}
-              tip="Planned fuel burn from departure to destination under normal routing and altitude — taken directly from your computerized flight plan (CFP or OFP). Does not include reserves."
-              error={errors.tripFuel}>
-              <input style={inputStyle(errors.tripFuel)} type="number" value={inp.tripFuel} onChange={e => set('tripFuel', +e.target.value)} />
+            <Field label={`Min Landing Fuel (${unit})`} tip="Minimum fuel at landing including reserves." t={t}>
+              <input style={mkInputStyle(t)} type="number" value={state.minLandingFuel} onChange={e => setSharedNum('minLandingFuel', e.target.value)} />
             </Field>
 
-            <Field label={`Min. Landing Fuel / Reserves (${unit})`}
-              tip="Minimum fuel at landing including: final reserve, alternate fuel (if req'd), additional company minima. This is the absolute floor — the tool will never recommend arriving below this.">
-              <input style={inputStyle()} type="number" value={inp.minLandingFuel} onChange={e => set('minLandingFuel', +e.target.value)} />
-            </Field>
-
-            <Field label="Fuel Burn Penalty Rate (%)"
-              tip="The fraction of extra fuel that gets burned due to the additional weight it adds. Typical range: 3–4% for jets. Example: carrying 1,000 lbs extra burns ≈35 lbs more at 3.5%, costing extra on every flight.">
+            <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned due to carrying additional weight. 3-4% typical for jets." t={t}>
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: '#6a7a90' }}>1%</span>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: '#f0a500' }}>{inp.burnPenaltyRate.toFixed(1)}%</span>
-                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: '#6a7a90' }}>8%</span>
+                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>1%</span>
+                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: t.accent }}>{n(state.burnPenaltyRate).toFixed(1)}%</span>
+                  <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>8%</span>
                 </div>
-                <input type="range" min={1} max={8} step={0.1} value={inp.burnPenaltyRate}
-                  onChange={e => set('burnPenaltyRate', +e.target.value)}
-                  style={{ width: '100%', accentColor: '#f0a500', cursor: 'pointer' }} />
+                <input type="range" min={1} max={8} step={0.1} value={state.burnPenaltyRate}
+                  onChange={e => setSharedNum('burnPenaltyRate', e.target.value)}
+                  style={{ width: '100%', cursor: 'pointer' }} />
               </div>
             </Field>
           </Panel>
 
-          {/* ── PANEL 3: FUEL PRICING & FEES ── */}
-          <Panel num="03" title="Fuel Pricing & Fees">
-            <Field label="Currency">
+          {/* SHARED: OPERATIONS */}
+          <Panel num="OP" title="Operations & Currency" t={t}>
+            <Field label="Operation Type" t={t}>
               <div className="avn-select-wrap">
-                <select style={selectStyle} value={inp.currency} onChange={e => set('currency', e.target.value)}>
-                  {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </div>
-            </Field>
-
-            <Row2>
-              <Field label={`Fuel Price — Departure (${sym}/${unit})`} error={errors.priceDep}>
-                <input style={inputStyle(errors.priceDep)} type="number" step={0.001} value={inp.priceDep} onChange={e => set('priceDep', +e.target.value)} />
-              </Field>
-              <Field label={`Fuel Price — Destination (${sym}/${unit})`} error={errors.priceDest}>
-                <input style={inputStyle(errors.priceDest)} type="number" step={0.001} value={inp.priceDest} onChange={e => set('priceDest', +e.target.value)} />
-              </Field>
-            </Row2>
-
-            <Row2>
-              <Field label={`Into-Plane Fee — Dep (${sym}/${unit})`}
-                tip="Per-unit surcharge applied by the fuel supplier or FBO at departure, on top of the base fuel price.">
-                <input style={inputStyle()} type="number" step={0.001} value={inp.upliftDep} onChange={e => set('upliftDep', +e.target.value)} />
-              </Field>
-              <Field label={`Into-Plane Fee — Dest (${sym}/${unit})`}
-                tip="Per-unit surcharge at the destination FBO.">
-                <input style={inputStyle()} type="number" step={0.001} value={inp.upliftDest} onChange={e => set('upliftDest', +e.target.value)} />
-              </Field>
-            </Row2>
-
-            <Row2>
-              <Field label={`Min. Purchase Req. (${unit})`}
-                tip="Minimum uplift quantity required by the destination FBO. If you arrive with enough tankered fuel and purchase less than this, a ramp/handling fee may be charged instead.">
-                <input style={inputStyle()} type="number" value={inp.minPurchaseReq} onChange={e => set('minPurchaseReq', +e.target.value)} />
-              </Field>
-              <Field label={`Ramp Fee if No Uplift (${sym})`}
-                tip="Flat handling/landing fee charged by the destination FBO if you do not purchase fuel (or meet the minimum). Tankering may allow you to avoid this cost.">
-                <input style={inputStyle()} type="number" value={inp.rampFee} onChange={e => set('rampFee', +e.target.value)} />
-              </Field>
-            </Row2>
-          </Panel>
-
-          {/* ── PANEL 4: REGULATORY & OPERATIONAL ── */}
-          <Panel num="04" title="Regulatory & Operational">
-            <Field label="Operation Type">
-              <div className="avn-select-wrap">
-                <select style={selectStyle} value={inp.operationType} onChange={e => set('operationType', e.target.value)}>
+                <select style={selectStyle} value={state.operationType} onChange={e => setShared('operationType', e.target.value)}>
                   <option value="part91">Part 91 / General Aviation</option>
                   <option value="part135">Part 135 / Charter</option>
                   <option value="part121">Part 121 / Airline</option>
@@ -760,113 +1025,109 @@ export default function TankeringTool() {
                 </select>
               </div>
             </Field>
-
-            <Row2>
-              <Field label="Alternate Airport Required?">
-                <Toggle
-                  value={inp.altRequired ? 'yes' : 'no'}
-                  options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]}
-                  onChange={v => set('altRequired', v === 'yes')}
-                />
-              </Field>
-              <Field label="International Flight?">
-                <Toggle
-                  value={inp.intlFlight ? 'yes' : 'no'}
-                  options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]}
-                  onChange={v => set('intlFlight', v === 'yes')}
-                />
-              </Field>
-            </Row2>
-
-            {inp.altRequired && (
-              <Field label={`Alternate Fuel (${unit})`}
-                tip="Fuel required to divert from destination to the filed alternate airport, including required holding. Counted as part of minimum fuel reserves.">
-                <input style={inputStyle()} type="number" value={inp.altFuel} onChange={e => set('altFuel', +e.target.value)} />
-              </Field>
-            )}
-
-            <Row2>
-              <Field label="Contingency Fuel (%)"
-                tip="Buffer fuel carried above planned trip fuel, expressed as a percentage. Typical values: 5% (Part 121/EASA), 0–10% for Part 91. Applied to trip fuel before calculating available tankering capacity.">
-                <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={inp.contingencyPct} onChange={e => set('contingencyPct', +e.target.value)} />
-              </Field>
-              <Field label="Fuel Tax Differential (%)"
-                tip="Extra tax rate at the destination compared to departure, as a percentage of the destination fuel price. Common on international sectors where fuel is taxed at different rates. Enter 0 if unknown or same.">
-                <InputWithSuffix type="number" suffix="%" min={0} max={50} step={0.5} value={inp.taxDiffPct} onChange={e => set('taxDiffPct', +e.target.value)} />
-              </Field>
-            </Row2>
-
-            {inp.intlFlight && inp.taxDiffPct === 0 && (
-              <div style={{
-                background: '#1a1a0a', border: '1px solid #3a3010',
-                borderRadius: 2, padding: '8px 12px', marginTop: 4,
-                fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: '#c8a840',
-              }}>
-                ⚠ INTL FLIGHT: Verify fuel tax rates. Enter tax differential above if applicable.
+            <Field label="Currency" t={t}>
+              <div className="avn-select-wrap">
+                <select style={selectStyle} value={state.currency} onChange={e => setShared('currency', e.target.value)}>
+                  {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
               </div>
-            )}
+            </Field>
           </Panel>
 
-          {/* ── ACTION BUTTONS ── */}
-          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 12 }}>
+          {/* LEG CARDS */}
+          {state.legs.map((leg, i) => (
+            <LegCard
+              key={leg.id}
+              leg={leg}
+              index={i}
+              totalLegs={state.legs.length}
+              shared={state}
+              errors={errors}
+              onUpdateLeg={updateLeg}
+              onRemoveLeg={removeLeg}
+              t={t}
+            />
+          ))}
+
+          {/* ADD LEG BUTTON */}
+          <div style={{ gridColumn: '1 / -1' }}>
+            <button onClick={addLeg} style={{
+              width: '100%', background: 'transparent',
+              border: `2px dashed ${t.border}`, borderRadius: 3,
+              color: t.textSec, padding: '14px',
+              fontFamily: "'Barlow Condensed', sans-serif",
+              fontSize: 15, fontWeight: 600, letterSpacing: '3px',
+              textTransform: 'uppercase', cursor: 'pointer',
+              transition: 'all 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.color = t.accent; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.textSec; }}
+            >+ ADD LEG</button>
+          </div>
+
+          {/* ACTION BUTTONS */}
+          <div className="avn-row2" style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr auto', gap: 12 }}>
             <button onClick={handleRun} style={{
-              flex: 1,
-              background: 'linear-gradient(180deg, #182a1c 0%, #0e1a11 100%)',
-              border: '2px solid #28a048', borderRadius: 3,
+              background: t.runBtnBg, border: `2px solid ${t.runBtnBorder}`, borderRadius: 3,
               color: '#38d068', padding: '15px 32px',
               fontFamily: "'Barlow Condensed', sans-serif",
               fontSize: 18, fontWeight: 700, letterSpacing: '4px',
-              textTransform: 'uppercase', cursor: 'pointer',
-              transition: 'all 0.15s',
+              textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.15s',
             }}
-            onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 0 24px rgba(40,160,72,0.35)'; e.currentTarget.style.borderColor = '#38d068'; }}
-            onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none'; e.currentTarget.style.borderColor = '#28a048'; }}
-            >▶  RUN CALCULATION</button>
+            onMouseEnter={e => { e.currentTarget.style.boxShadow = `0 0 24px ${t.runBtnGlow}`; }}
+            onMouseLeave={e => { e.currentTarget.style.boxShadow = 'none'; }}
+            >&#9654;  RUN CALCULATION</button>
 
             <button onClick={handleReset} style={{
-              background: 'transparent',
-              border: '1px solid #1e2a3a', borderRadius: 3,
-              color: '#4a5a70', padding: '15px 20px',
+              background: 'transparent', border: `1px solid ${t.border}`, borderRadius: 3,
+              color: t.textMuted, padding: '15px 20px',
               fontFamily: "'Barlow Condensed', sans-serif",
-              fontSize: 13, letterSpacing: '2px',
-              textTransform: 'uppercase', cursor: 'pointer',
-              transition: 'all 0.15s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = '#2a3a50'; e.currentTarget.style.color = '#7a8aa0'; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = '#1e2a3a'; e.currentTarget.style.color = '#4a5a70'; }}
-            >↺  RESET TO DEFAULTS</button>
+              fontSize: 13, letterSpacing: '2px', textTransform: 'uppercase', cursor: 'pointer',
+            }}>&#8634;  RESET</button>
           </div>
 
-          {/* ── VALIDATION ERRORS SUMMARY ── */}
+          {/* VALIDATION ERRORS */}
           {Object.keys(errors).length > 0 && (
-            <div style={{
-              gridColumn: '1 / -1',
-              background: '#1e0c0c', border: '1px solid #6a2020',
-              borderRadius: 3, padding: '12px 16px',
-            }}>
-              <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: '2px', color: '#c04040', marginBottom: 6 }}>INPUT VALIDATION ERRORS</div>
+            <div style={{ gridColumn: '1 / -1', background: t.errBg, border: `1px solid ${t.errBorder}`, borderRadius: 3, padding: '12px 16px' }}>
+              <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: '2px', color: '#c04040', marginBottom: 6 }}>VALIDATION ERRORS</div>
               {Object.values(errors).map((e, i) => (
-                <div key={i} style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: '#e05050', marginBottom: 3 }}>✗ {e}</div>
+                <div key={i} style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: '#e05050', marginBottom: 3 }}>{'\u2717'} {e}</div>
               ))}
             </div>
           )}
 
-          {/* ── RESULTS ── */}
-          {results && <ResultsPanel res={results} inp={inp} sym={sym} />}
+          {/* TOTAL SUMMARY (multi-leg) */}
+          {results && results.length > 1 && (
+            <div style={{
+              gridColumn: '1 / -1', background: t.headerBg, border: `2px solid ${totalNetSavings >= 0 ? '#28a048' : '#a02828'}`,
+              borderRadius: 3, padding: '16px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
+            }}>
+              <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 15, fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: t.textSec }}>
+                TOTAL ACROSS {results.length} LEGS
+              </div>
+              <div style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 28, fontWeight: 700, color: totalNetSavings >= 0 ? '#38d068' : '#e04040' }}>
+                {totalNetSavings < 0 ? '-' : ''}{sym}{Math.abs(totalNetSavings).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+            </div>
+          )}
 
+          {/* PER-LEG RESULTS */}
+          {results && results.map((res, i) => (
+            <ResultsPanel key={i} res={res} leg={state.legs[i]} shared={state} sym={sym} t={t} legIndex={i} totalLegs={state.legs.length} />
+          ))}
         </div>
 
-        {/* ── FOOTER ── */}
+        {/* FOOTER */}
         <div style={{
-          borderTop: '1px solid #1a2030', padding: '12px 24px',
+          borderTop: `1px solid ${t.headerBg}`, padding: '12px 24px',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           maxWidth: 1400, margin: '0 auto',
         }}>
-          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#3a5068' }}>
-            FOR PLANNING PURPOSES ONLY · VERIFY ALL DATA AGAINST CERTIFIED PERFORMANCE DOCUMENTATION
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: t.textMuted }}>
+            FOR PLANNING PURPOSES ONLY
           </span>
-          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: '#3a5068' }}>
-            TANKER v1.0
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: t.textMuted }}>
+            TANKER v2.0
           </span>
         </div>
       </div>
