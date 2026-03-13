@@ -1011,7 +1011,7 @@ function RoundTripResultPanel({ rtResult, sym, unit, t }) {
   );
 }
 
-// ─── WEIGHT BREAKDOWN PANEL ──────────────────────────────────────────────────
+// ─── WEIGHT BREAKDOWN CONTENT ────────────────────────────────────────────────
 function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
   const setWB = (k, v) => onUpdate(k, v);
   const setWBNum = (k, raw) => onUpdate(k, raw === '' ? '' : +raw);
@@ -1032,21 +1032,21 @@ function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
   ];
 
   return (
-    <Panel num="WT" title="Weight Breakdown" t={t} extra={
-      <Toggle value={wb.enabled ? 'on' : 'off'}
-        options={[{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]}
-        onChange={v => setWB('enabled', v === 'on')} t={t} />
-    }>
+    <>
+      <div style={{ marginBottom: 14 }}>
+        <Toggle value={wb.enabled ? 'on' : 'off'}
+          options={[{ value: 'on', label: 'On' }, { value: 'off', label: 'Off' }]}
+          onChange={v => setWB('enabled', v === 'on')} t={t} />
+      </div>
       {!wb.enabled ? (
-        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, color: t.textMuted, padding: '8px 0' }}>
-          Enable to break down ZFW into individual components (passengers, bags, cargo, etc.)
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, color: t.textMuted }}>
+          Enable to break down ZFW into individual components (passengers, bags, cargo, etc.) — auto-computes ZFW.
         </div>
       ) : (
         <>
           <Field label="Weight Unit" t={t}>
             <Toggle value={wU} options={[{ value: 'lbs', label: 'LBS' }, { value: 'kg', label: 'KG' }]} onChange={v => setWB('wbUnit', v)} t={t} />
           </Field>
-
           <Row2>
             <Field label={items[0].label} tip={items[0].tip} t={t}>
               <input style={mkInputStyle(t)} type="number" value={wb.oew} onChange={e => setWBNum('oew', e.target.value)} />
@@ -1055,7 +1055,6 @@ function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
               <input style={mkInputStyle(t)} type="number" min={0} max={999} value={wb.paxCount} onChange={e => setWBNum('paxCount', e.target.value)} />
             </Field>
           </Row2>
-
           <Field label={items[2].label} tip={items[2].tip} t={t}>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <input style={{ ...mkInputStyle(t), flex: 1 }} type="number" value={wb.avgPaxWt} onChange={e => setWBNum('avgPaxWt', e.target.value)} />
@@ -1070,7 +1069,6 @@ function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
               </div>
             </div>
           </Field>
-
           <Row2>
             {items.slice(3, 5).map(it => (
               <Field key={it.key} label={it.label} tip={it.tip} t={t}>
@@ -1088,8 +1086,6 @@ function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
           <Field label={items[7].label} tip={items[7].tip} t={t}>
             <input style={mkInputStyle(t)} type="number" value={wb.other} onChange={e => setWBNum('other', e.target.value)} />
           </Field>
-
-          {/* Computed ZFW total */}
           <div style={{
             borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 12,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -1103,7 +1099,7 @@ function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
           </div>
         </>
       )}
-    </Panel>
+    </>
   );
 }
 
@@ -1245,7 +1241,7 @@ export default function TankeringTool() {
   const [errors, setErrors] = useState({});
   const [unitSys, setUnitSys] = useState('imperial');
   const [theme, setTheme] = useState('dark');
-  const [showAcAdvanced, setShowAcAdvanced] = useState(false);
+  const [sections, setSections] = useState({ flight: false, weights: false, fees: false, advanced: false, wb: false });
   const t = THEMES[theme];
 
   const unit = state.fuelUnit;
@@ -1402,6 +1398,12 @@ export default function TankeringTool() {
 
   const totalNetSavings = results ? results.reduce((sum, r) => sum + r.netSav, 0) : 0;
   const selectStyle = mkSelectStyle(t);
+  const toggleSection = (key) => setSections(prev => ({ ...prev, [key]: !prev[key] }));
+
+  // Shorthand for leg 0
+  const leg0 = state.legs[0];
+  const setL0 = (k, v) => updateLeg(0, k, v);
+  const setL0Num = (k, raw) => updateLeg(0, k, raw === '' ? '' : +raw);
 
   return (
     <>
@@ -1458,118 +1460,256 @@ export default function TankeringTool() {
               <span style={{ fontSize: 11, letterSpacing: '1.5px', color: t.textMuted, textTransform: 'uppercase' }}>Units</span>
               <Toggle value={unitSys} options={[{ value: 'imperial', label: 'Imperial' }, { value: 'metric', label: 'Metric' }]} onChange={handleUnitSys} t={t} />
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 11, letterSpacing: '1.5px', color: t.textMuted, textTransform: 'uppercase' }}>Currency</span>
+              <div className="avn-select-wrap">
+                <select style={{ ...selectStyle, width: 'auto', padding: '5px 28px 5px 8px', fontSize: 12 }} value={state.currency} onChange={e => setShared('currency', e.target.value)}>
+                  {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* PANELS GRID */}
-        <div className="avn-grid" style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        {/* MAIN CONTENT */}
+        <div className="avn-grid" style={{ maxWidth: 900, margin: '0 auto', padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
 
-          {/* SHARED: AIRCRAFT & WEIGHT */}
-          <Panel num="AC" title="Aircraft & Weight" t={t}>
-            <Field label="Aircraft / Vehicle Type" t={t}>
-              <div className="avn-select-wrap">
-                <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
-                  <option value="">— Select Aircraft —</option>
-                  <option value="narrow">Narrow-body (B737 / A320)</option>
-                  <option value="wide">Wide-body (B777 / A350)</option>
-                  <option value="bizjet">Business Jet (G650 / Challenger)</option>
-                  <option value="turboprop">Turboprop (King Air)</option>
-                  <option value="helicopter">Helicopter (AW139 / S-76)</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </div>
-            </Field>
+          {/* ═══ ESSENTIALS — 8 core fields ═══ */}
+          <Panel num="01" title="Essentials" t={t}>
+            <Row2>
+              <Field label="Aircraft Type" t={t}>
+                <div className="avn-select-wrap">
+                  <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
+                    <option value="">— Select Aircraft —</option>
+                    <option value="narrow">Narrow-body (B737 / A320)</option>
+                    <option value="wide">Wide-body (B777 / A350)</option>
+                    <option value="bizjet">Business Jet (G650 / Challenger)</option>
+                    <option value="turboprop">Turboprop (King Air)</option>
+                    <option value="helicopter">Helicopter (AW139 / S-76)</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+              </Field>
+              <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors.trip_0} t={t}>
+                <input style={mkInputStyle(t, errors.trip_0)} type="number" value={leg0.tripFuel} onChange={e => setL0Num('tripFuel', e.target.value)} />
+              </Field>
+            </Row2>
 
-            <Field label="Fuel / Weight Unit" t={t}>
-              <Toggle value={unit} options={[{ value:'lbs',label:'LBS' },{ value:'kg',label:'KG' },{ value:'gal',label:'GAL' },{ value:'liters',label:'LITERS' }]} onChange={v => setShared('fuelUnit', v)} t={t} />
-            </Field>
+            <Row2>
+              <Field label="Departure" error={errors.dep_0} t={t}>
+                <AirportCombobox value={leg0.departure} onChange={v => setL0('departure', v)} error={errors.dep_0} t={t} />
+              </Field>
+              <Field label="Destination" error={errors.dest_0} t={t}>
+                <AirportCombobox value={leg0.destination} onChange={v => setL0('destination', v)} error={errors.dest_0} t={t} />
+              </Field>
+            </Row2>
+
+            <Row2>
+              <Field label={`Fuel Price — Departure (${sym}/${unit})`} t={t}>
+                <input style={mkInputStyle(t)} type="number" step={0.001} value={leg0.priceDep} onChange={e => setL0Num('priceDep', e.target.value)} />
+              </Field>
+              <Field label={`Fuel Price — Destination (${sym}/${unit})`} t={t}>
+                <input style={mkInputStyle(t)} type="number" step={0.001} value={leg0.priceDest} onChange={e => setL0Num('priceDest', e.target.value)} />
+              </Field>
+            </Row2>
 
             <Row2>
               <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight — hard structural limit." error={errors.mtow} t={t}>
                 <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
               </Field>
-              <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — if tankered fuel isn't burned off, you may exceed this. Limits tankering on short legs." t={t}>
-                <input style={mkInputStyle(t)} type="number" value={state.mlw} onChange={e => setSharedNum('mlw', e.target.value)} />
-              </Field>
-            </Row2>
-
-            <Row2>
               <Field label={`ZFW (${unit})`} tip="Zero Fuel Weight — aircraft + payload, no fuel." error={errors.zfw} t={t}>
                 <input style={mkInputStyle(t, errors.zfw)} type="number" value={state.zfw} onChange={e => setSharedNum('zfw', e.target.value)} />
               </Field>
-              <Field label={`Max Fuel Capacity (${unit})`} tip="Maximum fuel the tanks can hold. Hard limit regardless of weight." t={t}>
-                <input style={mkInputStyle(t)} type="number" value={state.maxFuel} onChange={e => setSharedNum('maxFuel', e.target.value)} />
-              </Field>
             </Row2>
+          </Panel>
 
-            <Field label={`Min Landing Fuel (${unit})`} tip="Minimum fuel at landing including reserves." t={t}>
-              <input style={mkInputStyle(t)} type="number" value={state.minLandingFuel} onChange={e => setSharedNum('minLandingFuel', e.target.value)} />
-            </Field>
-
-            <div style={{ borderTop: `1px solid ${t.border}`, marginTop: 8, paddingTop: 8 }}>
-              <button onClick={() => setShowAcAdvanced(!showAcAdvanced)} style={{
-                background: 'transparent', border: 'none', cursor: 'pointer',
-                color: t.accent, fontFamily: "'Barlow Condensed', sans-serif",
-                fontSize: 12, letterSpacing: '1.5px', textTransform: 'uppercase',
-                padding: '4px 0', display: 'flex', alignItems: 'center', gap: 6,
-              }}>
-                <span style={{ fontSize: 10, transition: 'transform 0.15s', transform: showAcAdvanced ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
-                ADVANCED
-              </button>
-              {showAcAdvanced && (
-                <div style={{ marginTop: 10 }}>
-                  <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned due to carrying additional weight. 3-4% typical for jets. Auto-set when you select an aircraft type." t={t}>
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>1%</span>
-                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: t.accent }}>{n(state.burnPenaltyRate).toFixed(1)}%</span>
-                        <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>8%</span>
-                      </div>
-                      <input type="range" min={1} max={8} step={0.1} value={state.burnPenaltyRate}
-                        onChange={e => setSharedNum('burnPenaltyRate', e.target.value)}
-                        style={{ width: '100%', cursor: 'pointer' }} />
+          {/* ═══ ACCORDION: Flight Details ═══ */}
+          <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+            <button onClick={() => toggleSection('flight')} style={{
+              width: '100%', background: t.headerBg, border: 'none', cursor: 'pointer',
+              padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+              borderBottom: sections.flight ? `1px solid ${t.border}` : 'none',
+            }}>
+              <span style={{ fontSize: 10, color: t.accent, transition: 'transform 0.15s', transform: sections.flight ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2.5px', textTransform: 'uppercase', color: t.textSec, flex: 1, textAlign: 'left' }}>FLIGHT DETAILS</span>
+              {leg0.distance && <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: t.textMuted }}>{leg0.distance} NM</span>}
+            </button>
+            {sections.flight && (
+              <div style={{ padding: 16 }}>
+                <Row2>
+                  <Field label="Distance" t={t}>
+                    <InputWithSuffix type="number" suffix="NM" value={leg0.distance} onChange={e => setL0Num('distance', e.target.value)} t={t} />
+                  </Field>
+                  <Field label="Wind Conditions" t={t}>
+                    <div className="avn-select-wrap">
+                      <select style={selectStyle} value={leg0.windScenario} onChange={e => setL0('windScenario', e.target.value)}>
+                        {WIND_SCENARIOS.map(w => (
+                          <option key={w.value} value={w.value}>{w.label} ({w.kt >= 0 ? '+' : ''}{w.kt} kt)</option>
+                        ))}
+                      </select>
                     </div>
                   </Field>
-                  <Field label="Payload Displacement Rate ($/lb)" tip="Revenue lost per pound of cargo/passengers offloaded to make room for tankered fuel. Leave blank or 0 if payload is fixed." t={t}>
-                    <input style={mkInputStyle(t)} type="number" step={0.01} value={state.payloadRate} onChange={e => setSharedNum('payloadRate', e.target.value)} />
+                </Row2>
+                <Row2>
+                  <Field label="Cruise Altitude" tip="Flight level (e.g. 350 = FL350). Affects fuel burn." t={t}>
+                    <InputWithSuffix type="number" suffix="FL" min={0} max={500} value={leg0.cruiseFL} onChange={e => setL0Num('cruiseFL', e.target.value)} placeholder="e.g. 350" t={t} />
                   </Field>
-                </div>
-              )}
-            </div>
-          </Panel>
-
-          {/* SHARED: OPERATIONS */}
-          <Panel num="OP" title="Operations & Currency" t={t}>
-            <Field label="Operation Type" t={t}>
-              <div className="avn-select-wrap">
-                <select style={selectStyle} value={state.operationType} onChange={e => setShared('operationType', e.target.value)}>
-                  <option value="part91">Part 91 / General Aviation</option>
-                  <option value="part135">Part 135 / Charter</option>
-                  <option value="part121">Part 121 / Airline</option>
-                  <option value="military">Military / Government</option>
-                  <option value="easa">EASA OPS</option>
-                  <option value="custom">Custom</option>
-                </select>
+                  <Field label="Est. Flight Time" t={t}>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <InputWithSuffix type="number" suffix="HR" min={0} max={24} value={leg0.flightHours} onChange={e => setL0Num('flightHours', e.target.value)} t={t} />
+                      <InputWithSuffix type="number" suffix="MIN" min={0} max={59} value={leg0.flightMinutes} onChange={e => setL0Num('flightMinutes', e.target.value)} t={t} />
+                    </div>
+                  </Field>
+                </Row2>
+                <Field label="Alternate Required?" t={t}>
+                  <Toggle value={leg0.altRequired ? 'yes' : 'no'} options={[{ value: 'yes', label: 'Yes' }, { value: 'no', label: 'No' }]} onChange={v => setL0('altRequired', v === 'yes')} t={t} />
+                </Field>
+                {leg0.altRequired && (
+                  <Field label={`Alternate Fuel (${unit})`} t={t}>
+                    <input style={mkInputStyle(t)} type="number" value={leg0.altFuel} onChange={e => setL0Num('altFuel', e.target.value)} />
+                  </Field>
+                )}
               </div>
-            </Field>
-            <Field label="Currency" t={t}>
-              <div className="avn-select-wrap">
-                <select style={selectStyle} value={state.currency} onChange={e => setShared('currency', e.target.value)}>
-                  {Object.keys(CURRENCY_SYMBOLS).map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
+            )}
+          </div>
+
+          {/* ═══ ACCORDION: Weight & Fuel Limits ═══ */}
+          <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+            <button onClick={() => toggleSection('weights')} style={{
+              width: '100%', background: t.headerBg, border: 'none', cursor: 'pointer',
+              padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+              borderBottom: sections.weights ? `1px solid ${t.border}` : 'none',
+            }}>
+              <span style={{ fontSize: 10, color: t.accent, transition: 'transform 0.15s', transform: sections.weights ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2.5px', textTransform: 'uppercase', color: t.textSec, flex: 1, textAlign: 'left' }}>WEIGHT & FUEL LIMITS</span>
+            </button>
+            {sections.weights && (
+              <div style={{ padding: 16 }}>
+                <Row2>
+                  <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — limits tankering on short legs." t={t}>
+                    <input style={mkInputStyle(t)} type="number" value={state.mlw} onChange={e => setSharedNum('mlw', e.target.value)} />
+                  </Field>
+                  <Field label={`Max Fuel Capacity (${unit})`} tip="Maximum fuel the tanks can hold." t={t}>
+                    <input style={mkInputStyle(t)} type="number" value={state.maxFuel} onChange={e => setSharedNum('maxFuel', e.target.value)} />
+                  </Field>
+                </Row2>
+                <Field label={`Min Landing Fuel (${unit})`} tip="Minimum fuel at landing including reserves." t={t}>
+                  <input style={mkInputStyle(t)} type="number" value={state.minLandingFuel} onChange={e => setSharedNum('minLandingFuel', e.target.value)} />
+                </Field>
+                <Field label="Fuel / Weight Unit" t={t}>
+                  <Toggle value={unit} options={[{ value:'lbs',label:'LBS' },{ value:'kg',label:'KG' },{ value:'gal',label:'GAL' },{ value:'liters',label:'LITERS' }]} onChange={v => setShared('fuelUnit', v)} t={t} />
+                </Field>
               </div>
-            </Field>
-          </Panel>
+            )}
+          </div>
 
-          {/* WEIGHT BREAKDOWN (optional) */}
-          <WeightBreakdownPanel wb={state.weightBreakdown} fuelUnit={state.fuelUnit} onUpdate={updateWB} t={t} />
+          {/* ═══ ACCORDION: Fees & Adjustments ═══ */}
+          <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+            <button onClick={() => toggleSection('fees')} style={{
+              width: '100%', background: t.headerBg, border: 'none', cursor: 'pointer',
+              padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+              borderBottom: sections.fees ? `1px solid ${t.border}` : 'none',
+            }}>
+              <span style={{ fontSize: 10, color: t.accent, transition: 'transform 0.15s', transform: sections.fees ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2.5px', textTransform: 'uppercase', color: t.textSec, flex: 1, textAlign: 'left' }}>FEES & ADJUSTMENTS</span>
+            </button>
+            {sections.fees && (
+              <div style={{ padding: 16 }}>
+                <Row2>
+                  <Field label={`FBO Surcharge — Dep (${sym}/${unit})`} tip="Fee charged by the FBO on top of fuel price." t={t}>
+                    <input style={mkInputStyle(t)} type="number" step={0.001} value={leg0.fboSurchargeDep} onChange={e => setL0Num('fboSurchargeDep', e.target.value)} />
+                  </Field>
+                  <Field label={`FBO Surcharge — Dest (${sym}/${unit})`} t={t}>
+                    <input style={mkInputStyle(t)} type="number" step={0.001} value={leg0.fboSurchargeDest} onChange={e => setL0Num('fboSurchargeDest', e.target.value)} />
+                  </Field>
+                </Row2>
+                <Row2>
+                  <Field label={`Min Purchase (${unit})`} tip="Minimum fuel buy to waive ramp fees at destination." t={t}>
+                    <input style={mkInputStyle(t)} type="number" value={leg0.minPurchaseReq} onChange={e => setL0Num('minPurchaseReq', e.target.value)} />
+                  </Field>
+                  <Field label={`Ramp Fee (${sym})`} tip="Fee waived if minimum fuel purchase is met." t={t}>
+                    <input style={mkInputStyle(t)} type="number" value={leg0.rampFee} onChange={e => setL0Num('rampFee', e.target.value)} />
+                  </Field>
+                </Row2>
+                <Row2>
+                  <Field label="Contingency (%)" tip="Extra fuel as safety margin. Typical: 3-5%." t={t}>
+                    <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={leg0.contingencyPct} onChange={e => setL0Num('contingencyPct', e.target.value)} placeholder="0" t={t} />
+                  </Field>
+                  <Field label="Tax Differential (%)" tip="Tax difference between departure and destination fuel." t={t}>
+                    <InputWithSuffix type="number" suffix="%" min={0} max={50} step={0.5} value={leg0.taxDiffPct} onChange={e => setL0Num('taxDiffPct', e.target.value)} placeholder="0" t={t} />
+                  </Field>
+                </Row2>
+              </div>
+            )}
+          </div>
 
-          {/* LEG CARDS */}
-          {state.legs.map((leg, i) => (
+          {/* ═══ ACCORDION: Advanced Settings ═══ */}
+          <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+            <button onClick={() => toggleSection('advanced')} style={{
+              width: '100%', background: t.headerBg, border: 'none', cursor: 'pointer',
+              padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+              borderBottom: sections.advanced ? `1px solid ${t.border}` : 'none',
+            }}>
+              <span style={{ fontSize: 10, color: t.accent, transition: 'transform 0.15s', transform: sections.advanced ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2.5px', textTransform: 'uppercase', color: t.textSec, flex: 1, textAlign: 'left' }}>ADVANCED SETTINGS</span>
+            </button>
+            {sections.advanced && (
+              <div style={{ padding: 16 }}>
+                <Field label="Burn Penalty Rate (%)" tip="Extra fuel burned from carrying additional weight. 3-4% typical for jets. Auto-set by aircraft type." t={t}>
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>1%</span>
+                      <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 13, color: t.accent }}>{n(state.burnPenaltyRate).toFixed(1)}%</span>
+                      <span style={{ fontFamily: "'Share Tech Mono'", fontSize: 11, color: t.textMuted }}>8%</span>
+                    </div>
+                    <input type="range" min={1} max={8} step={0.1} value={state.burnPenaltyRate}
+                      onChange={e => setSharedNum('burnPenaltyRate', e.target.value)}
+                      style={{ width: '100%', cursor: 'pointer' }} />
+                  </div>
+                </Field>
+                <Field label="Payload Displacement Rate ($/lb)" tip="Revenue lost per pound offloaded for fuel. Leave blank if payload is fixed." t={t}>
+                  <input style={mkInputStyle(t)} type="number" step={0.01} value={state.payloadRate} onChange={e => setSharedNum('payloadRate', e.target.value)} />
+                </Field>
+                <Field label="Operation Type" t={t}>
+                  <div className="avn-select-wrap">
+                    <select style={selectStyle} value={state.operationType} onChange={e => setShared('operationType', e.target.value)}>
+                      <option value="part91">Part 91 / General Aviation</option>
+                      <option value="part135">Part 135 / Charter</option>
+                      <option value="part121">Part 121 / Airline</option>
+                      <option value="military">Military / Government</option>
+                      <option value="easa">EASA OPS</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                </Field>
+              </div>
+            )}
+          </div>
+
+          {/* ═══ ACCORDION: Weight Breakdown ═══ */}
+          <div style={{ background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+            <button onClick={() => toggleSection('wb')} style={{
+              width: '100%', background: t.headerBg, border: 'none', cursor: 'pointer',
+              padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+              borderBottom: sections.wb ? `1px solid ${t.border}` : 'none',
+            }}>
+              <span style={{ fontSize: 10, color: t.accent, transition: 'transform 0.15s', transform: sections.wb ? 'rotate(90deg)' : 'rotate(0deg)' }}>{'\u25B6'}</span>
+              <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2.5px', textTransform: 'uppercase', color: t.textSec, flex: 1, textAlign: 'left' }}>WEIGHT BREAKDOWN</span>
+              {state.weightBreakdown.enabled && <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 11, color: t.accent }}>ACTIVE</span>}
+            </button>
+            {sections.wb && (
+              <div style={{ padding: 16 }}>
+                <WeightBreakdownPanel wb={state.weightBreakdown} fuelUnit={state.fuelUnit} onUpdate={updateWB} t={t} />
+              </div>
+            )}
+          </div>
+
+          {/* ═══ ADDITIONAL LEGS ═══ */}
+          {state.legs.length > 1 && state.legs.slice(1).map((leg, i) => (
             <LegCard
               key={leg.id}
               leg={leg}
-              index={i}
+              index={i + 1}
               totalLegs={state.legs.length}
               shared={state}
               errors={errors}
@@ -1580,7 +1720,7 @@ export default function TankeringTool() {
           ))}
 
           {/* ADD LEG BUTTONS */}
-          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 12 }}>
             <button onClick={addLeg} style={{
               flex: 1, background: 'transparent',
               border: `2px dashed ${t.border}`, borderRadius: 3,
@@ -1593,7 +1733,7 @@ export default function TankeringTool() {
             onMouseEnter={e => { e.currentTarget.style.borderColor = t.accent; e.currentTarget.style.color = t.accent; }}
             onMouseLeave={e => { e.currentTarget.style.borderColor = t.border; e.currentTarget.style.color = t.textSec; }}
             >+ ADD LEG</button>
-            {state.legs.length === 1 && state.legs[0].departure && state.legs[0].destination && (
+            {state.legs.length === 1 && leg0.departure && leg0.destination && (
               <button onClick={() => {
                 setState(prev => {
                   const out = prev.legs[0];
@@ -1623,7 +1763,7 @@ export default function TankeringTool() {
           </div>
 
           {/* ACTION BUTTONS */}
-          <div className="avn-row2" style={{ gridColumn: '1 / -1', display: 'grid', gridTemplateColumns: '1fr auto', gap: 12 }}>
+          <div className="avn-row2" style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 12 }}>
             <button onClick={handleRun} style={{
               background: t.runBtnBg, border: `2px solid ${t.runBtnBorder}`, borderRadius: 3,
               color: '#38d068', padding: '15px 32px',
@@ -1645,7 +1785,7 @@ export default function TankeringTool() {
 
           {/* VALIDATION ERRORS */}
           {Object.keys(errors).length > 0 && (
-            <div style={{ gridColumn: '1 / -1', background: t.errBg, border: `1px solid ${t.errBorder}`, borderRadius: 3, padding: '12px 16px' }}>
+            <div style={{ background: t.errBg, border: `1px solid ${t.errBorder}`, borderRadius: 3, padding: '12px 16px' }}>
               <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, fontWeight: 700, letterSpacing: '2px', color: '#c04040', marginBottom: 6 }}>VALIDATION ERRORS</div>
               {Object.values(errors).map((e, i) => (
                 <div key={i} style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: '#e05050', marginBottom: 3 }}>{'\u2717'} {e}</div>
@@ -1656,7 +1796,7 @@ export default function TankeringTool() {
           {/* TOTAL SUMMARY (multi-leg) */}
           {results && results.length > 1 && (
             <div style={{
-              gridColumn: '1 / -1', background: t.headerBg, border: `2px solid ${totalNetSavings >= 0 ? '#28a048' : '#a02828'}`,
+              background: t.headerBg, border: `2px solid ${totalNetSavings >= 0 ? '#28a048' : '#a02828'}`,
               borderRadius: 3, padding: '16px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
             }}>
               <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 15, fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: t.textSec }}>
@@ -1683,13 +1823,13 @@ export default function TankeringTool() {
         <div style={{
           borderTop: `1px solid ${t.headerBg}`, padding: '12px 24px',
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-          maxWidth: 1400, margin: '0 auto',
+          maxWidth: 900, margin: '0 auto',
         }}>
           <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: t.textMuted }}>
             FOR PLANNING PURPOSES ONLY
           </span>
           <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 10, color: t.textMuted }}>
-            TANKER v2.0
+            TANKER v3.0
           </span>
         </div>
       </div>
