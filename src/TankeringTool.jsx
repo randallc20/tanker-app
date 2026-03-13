@@ -1490,21 +1490,26 @@ export default function TankeringTool() {
         {/* MAIN CONTENT */}
         <div className="avn-grid" style={{ maxWidth: 900, margin: '0 auto', padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
 
-          {/* ═══ ESSENTIALS — 5 core fields ═══ */}
+          {/* ═══ ESSENTIALS — 6 core fields ═══ */}
           <Panel num="01" title="Essentials" t={t}>
-            <Field label="Aircraft Type" t={t}>
-              <div className="avn-select-wrap">
-                <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
-                  <option value="">— Select Aircraft —</option>
-                  <option value="narrow">Narrow-body (B737 / A320)</option>
-                  <option value="wide">Wide-body (B777 / A350)</option>
-                  <option value="bizjet">Business Jet (G650 / Challenger)</option>
-                  <option value="turboprop">Turboprop (King Air)</option>
-                  <option value="helicopter">Helicopter (AW139 / S-76)</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </div>
-            </Field>
+            <Row2>
+              <Field label="Aircraft Type" t={t}>
+                <div className="avn-select-wrap">
+                  <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
+                    <option value="">— Select Aircraft —</option>
+                    <option value="narrow">Narrow-body (B737 / A320)</option>
+                    <option value="wide">Wide-body (B777 / A350)</option>
+                    <option value="bizjet">Business Jet (G650 / Challenger)</option>
+                    <option value="turboprop">Turboprop (King Air)</option>
+                    <option value="helicopter">Helicopter (AW139 / S-76)</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </div>
+              </Field>
+              <Field label={`Trip Fuel (${unit})`} tip="Planned fuel burn for the trip — from your flight plan. Auto-estimated if left blank." error={errors.trip_0} t={t}>
+                <input style={mkInputStyle(t, errors.trip_0)} type="number" value={leg0.tripFuel} onChange={e => setL0Num('tripFuel', e.target.value)} />
+              </Field>
+            </Row2>
 
             <Row2>
               <Field label="Departure" error={errors.dep_0} t={t}>
@@ -1552,9 +1557,6 @@ export default function TankeringTool() {
             </button>
             {sections.flight && (
               <div style={{ padding: 16 }}>
-                <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors.trip_0} t={t}>
-                  <input style={mkInputStyle(t, errors.trip_0)} type="number" value={leg0.tripFuel} onChange={e => setL0Num('tripFuel', e.target.value)} />
-                </Field>
                 <Row2>
                   <Field label="Distance" t={t}>
                     <InputWithSuffix type="number" suffix="NM" value={leg0.distance} onChange={e => setL0Num('distance', e.target.value)} t={t} />
