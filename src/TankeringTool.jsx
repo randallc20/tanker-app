@@ -612,18 +612,34 @@ const mkSelectStyle = (t) => ({
 
 function InfoTip({ text, t }) {
   const [show, setShow] = useState(false);
+  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const iconRef = useRef(null);
+
+  const handleEnter = () => {
+    if (iconRef.current) {
+      const rect = iconRef.current.getBoundingClientRect();
+      setPos({
+        top: rect.bottom + 8,
+        left: Math.min(Math.max(rect.left - 120, 8), window.innerWidth - 296),
+      });
+    }
+    setShow(true);
+  };
+
   return (
     <span style={{ position: 'relative', display: 'inline-flex', marginLeft: 5 }}>
-      <span onMouseEnter={() => setShow(true)} onMouseLeave={() => setShow(false)}
+      <span ref={iconRef} onMouseEnter={handleEnter} onMouseLeave={() => setShow(false)}
+        onClick={handleEnter} onTouchStart={handleEnter}
         style={{ cursor: 'help', color: t.accent, fontSize: 13, lineHeight: 1 }}>&#9432;</span>
       {show && (
         <span style={{
-          position: 'absolute', bottom: '130%', left: '50%',
-          transform: 'translateX(-50%)', background: t.tipBg,
-          color: t.tipText, padding: '8px 12px', borderRadius: 3,
-          fontSize: 12, width: 240, zIndex: 9999,
+          position: 'fixed', zIndex: 99999,
+          top: pos.top, left: pos.left,
+          background: t.tipBg, color: t.tipText,
+          padding: '10px 14px', borderRadius: 4,
+          fontSize: 12, width: 280, maxWidth: '90vw',
           border: `1px solid ${t.tipBorder}`, lineHeight: 1.6,
-          boxShadow: `0 4px 16px ${t.shadow}`, pointerEvents: 'none',
+          boxShadow: `0 4px 20px ${t.shadow}`, pointerEvents: 'none',
           fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 400,
         }}>{text}</span>
       )}
@@ -1474,26 +1490,21 @@ export default function TankeringTool() {
         {/* MAIN CONTENT */}
         <div className="avn-grid" style={{ maxWidth: 900, margin: '0 auto', padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
 
-          {/* ═══ ESSENTIALS — 8 core fields ═══ */}
+          {/* ═══ ESSENTIALS — 5 core fields ═══ */}
           <Panel num="01" title="Essentials" t={t}>
-            <Row2>
-              <Field label="Aircraft Type" t={t}>
-                <div className="avn-select-wrap">
-                  <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
-                    <option value="">— Select Aircraft —</option>
-                    <option value="narrow">Narrow-body (B737 / A320)</option>
-                    <option value="wide">Wide-body (B777 / A350)</option>
-                    <option value="bizjet">Business Jet (G650 / Challenger)</option>
-                    <option value="turboprop">Turboprop (King Air)</option>
-                    <option value="helicopter">Helicopter (AW139 / S-76)</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </div>
-              </Field>
-              <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors.trip_0} t={t}>
-                <input style={mkInputStyle(t, errors.trip_0)} type="number" value={leg0.tripFuel} onChange={e => setL0Num('tripFuel', e.target.value)} />
-              </Field>
-            </Row2>
+            <Field label="Aircraft Type" t={t}>
+              <div className="avn-select-wrap">
+                <select style={selectStyle} value={state.aircraftType} onChange={e => handleAircraftType(e.target.value)}>
+                  <option value="">— Select Aircraft —</option>
+                  <option value="narrow">Narrow-body (B737 / A320)</option>
+                  <option value="wide">Wide-body (B777 / A350)</option>
+                  <option value="bizjet">Business Jet (G650 / Challenger)</option>
+                  <option value="turboprop">Turboprop (King Air)</option>
+                  <option value="helicopter">Helicopter (AW139 / S-76)</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+            </Field>
 
             <Row2>
               <Field label="Departure" error={errors.dep_0} t={t}>
@@ -1513,14 +1524,19 @@ export default function TankeringTool() {
               </Field>
             </Row2>
 
-            <Row2>
-              <Field label={`MTOW (${unit})`} tip="Maximum Takeoff Weight — hard structural limit." error={errors.mtow} t={t}>
-                <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
-              </Field>
-              <Field label={`ZFW (${unit})`} tip="Zero Fuel Weight — aircraft + payload, no fuel." error={errors.zfw} t={t}>
-                <input style={mkInputStyle(t, errors.zfw)} type="number" value={state.zfw} onChange={e => setSharedNum('zfw', e.target.value)} />
-              </Field>
-            </Row2>
+            {/* Auto-filled weight summary from aircraft type */}
+            {state.aircraftType && state.aircraftType !== 'custom' && (
+              <div style={{
+                marginTop: 4, padding: '10px 14px', borderRadius: 3,
+                background: t.summaryBg, border: `1px solid ${t.border}`,
+                display: 'flex', flexWrap: 'wrap', gap: 16,
+                fontFamily: "'Share Tech Mono', monospace", fontSize: 12,
+              }}>
+                <span style={{ color: t.textMuted }}>Max Takeoff Weight: <span style={{ color: t.accent }}>{state.mtow ? `${Number(state.mtow).toLocaleString()} ${unit}` : '—'}</span></span>
+                <span style={{ color: t.textMuted }}>Weight Without Fuel: <span style={{ color: t.accent }}>{state.zfw ? `${Number(state.zfw).toLocaleString()} ${unit}` : '—'}</span></span>
+                {leg0.tripFuel && <span style={{ color: t.textMuted }}>Trip Fuel: <span style={{ color: t.accent }}>{Number(leg0.tripFuel).toLocaleString()} {unit}</span></span>}
+              </div>
+            )}
           </Panel>
 
           {/* ═══ ACCORDION: Flight Details ═══ */}
@@ -1536,6 +1552,9 @@ export default function TankeringTool() {
             </button>
             {sections.flight && (
               <div style={{ padding: 16 }}>
+                <Field label={`Trip Fuel (${unit})`} tip="Auto-estimated from route & aircraft. Override as needed." error={errors.trip_0} t={t}>
+                  <input style={mkInputStyle(t, errors.trip_0)} type="number" value={leg0.tripFuel} onChange={e => setL0Num('tripFuel', e.target.value)} />
+                </Field>
                 <Row2>
                   <Field label="Distance" t={t}>
                     <InputWithSuffix type="number" suffix="NM" value={leg0.distance} onChange={e => setL0Num('distance', e.target.value)} t={t} />
@@ -1586,7 +1605,15 @@ export default function TankeringTool() {
             {sections.weights && (
               <div style={{ padding: 16 }}>
                 <Row2>
-                  <Field label={`MLW (${unit})`} tip="Maximum Landing Weight — limits tankering on short legs." t={t}>
+                  <Field label={`Max Takeoff Weight (${unit})`} tip="The maximum weight allowed at takeoff — structural limit set by the manufacturer." error={errors.mtow} t={t}>
+                    <input style={mkInputStyle(t, errors.mtow)} type="number" value={state.mtow} onChange={e => setSharedNum('mtow', e.target.value)} />
+                  </Field>
+                  <Field label={`Weight Without Fuel (${unit})`} tip="Aircraft weight with passengers, bags, and cargo but no fuel loaded." error={errors.zfw} t={t}>
+                    <input style={mkInputStyle(t, errors.zfw)} type="number" value={state.zfw} onChange={e => setSharedNum('zfw', e.target.value)} />
+                  </Field>
+                </Row2>
+                <Row2>
+                  <Field label={`Max Landing Weight (${unit})`} tip="Maximum weight allowed at landing — limits how much extra fuel you can carry on short legs." t={t}>
                     <input style={mkInputStyle(t)} type="number" value={state.mlw} onChange={e => setSharedNum('mlw', e.target.value)} />
                   </Field>
                   <Field label={`Max Fuel Capacity (${unit})`} tip="Maximum fuel the tanks can hold." t={t}>
