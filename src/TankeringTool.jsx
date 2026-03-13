@@ -450,6 +450,160 @@ function runRoundTripAnalysis(shared, outLeg, retLeg) {
   };
 }
 
+// ─── MULTI-LEG FUEL PURCHASE PLAN OPTIMIZER ──────────────────────────────────
+// Given a multi-leg trip, determines the cheapest overall fuel buying strategy
+// by looking ahead at prices at all upcoming stops. Accounts for burn penalty
+// from carrying extra weight and respects tank capacity, weight limits, and
+// minimum purchase requirements at each stop.
+
+function buildFuelPurchasePlan(shared, legs) {
+  if (!legs || legs.length < 1) return null;
+  const unit = shared.fuelUnit;
+  const mtow = toLbs(n(shared.mtow), unit);
+  const zfw = toLbs(n(shared.zfw), unit);
+  const maxFuelCap = toLbs(n(shared.maxFuel), unit);
+  const minLand = toLbs(n(shared.minLandingFuel), unit);
+  const burnRate = n(shared.burnPenaltyRate) / 100;
+
+  // Build stops array: each place fuel can be purchased
+  // Stop i corresponds to leg i's departure airport
+  const stops = legs.map((leg, i) => {
+    const tripFuel = toLbs(n(leg.tripFuel), unit);
+    const altFuel = leg.altRequired ? toLbs(n(leg.altFuel), unit) : 0;
+    const contPct = n(leg.contingencyPct) / 100;
+    const tripEff = tripFuel * (1 + contPct);
+    const price = n(leg.priceDep) + n(leg.fboSurchargeDep);
+    const minPurchase = toLbs(n(leg.minPurchaseReq), unit);
+    return {
+      airport: leg.departure || `Stop ${i + 1}`,
+      price,
+      tripFuelToNext: tripEff,
+      altFuel,
+      minPurchase,
+      legIndex: i,
+    };
+  });
+
+  // Validate: need prices and trip fuel
+  if (stops.some(s => s.price <= 0) || stops.some(s => s.tripFuelToNext <= 0)) return null;
+
+  // ─── NAIVE STRATEGY: buy exactly what you need at each stop ───
+  const naive = stops.map(s => ({
+    airport: s.airport,
+    buy: s.tripFuelToNext + minLand + s.altFuel,
+    price: s.price,
+  }));
+  const naiveTotalCost = naive.reduce((sum, s) => sum + s.buy * s.price, 0);
+
+  // ─── OPTIMAL STRATEGY: greedy forward-looking ───
+  // At each stop, decide how much to buy based on prices ahead
+  const plan = [];
+  let fuelOnBoard = 0; // lbs currently in tanks
+
+  for (let i = 0; i < stops.length; i++) {
+    const stop = stops[i];
+    // Minimum fuel needed: enough to fly this leg with reserves
+    const minRequired = stop.tripFuelToNext + minLand + stop.altFuel;
+    // How much more we need to buy at minimum
+    let mustBuy = Math.max(0, minRequired - fuelOnBoard);
+
+    // Respect minimum purchase requirement (FBO minimum)
+    if (stop.minPurchase > 0 && mustBuy > 0) {
+      mustBuy = Math.max(mustBuy, stop.minPurchase);
+    }
+
+    // Max we can carry: limited by tank capacity and MTOW
+    const maxFromTank = maxFuelCap > 0 ? Math.max(0, maxFuelCap - fuelOnBoard) : Infinity;
+    const currentWeight = zfw + fuelOnBoard;
+    const maxFromWeight = mtow > 0 ? Math.max(0, mtow - currentWeight) : Infinity;
+    const maxCanBuy = Math.min(maxFromTank, maxFromWeight);
+
+    // Look ahead: find the next stop with a cheaper or equal price
+    let cheaperAheadIdx = -1;
+    for (let j = i + 1; j < stops.length; j++) {
+      if (stops[j].price <= stop.price) {
+        cheaperAheadIdx = j;
+        break;
+      }
+    }
+
+    let targetBuy;
+    if (cheaperAheadIdx === -1) {
+      // This is the cheapest remaining stop — fill up as much as possible
+      // Calculate total fuel needed for all remaining legs
+      let totalRemaining = 0;
+      for (let j = i; j < stops.length; j++) {
+        totalRemaining += stops[j].tripFuelToNext + stops[j].altFuel;
+      }
+      totalRemaining += minLand; // final reserves
+      const wantToBuy = Math.max(0, totalRemaining - fuelOnBoard);
+      targetBuy = Math.min(wantToBuy, maxCanBuy);
+    } else {
+      // A cheaper stop exists ahead — buy just enough to reach it
+      let fuelToReach = 0;
+      for (let j = i; j < cheaperAheadIdx; j++) {
+        fuelToReach += stops[j].tripFuelToNext + stops[j].altFuel;
+      }
+      fuelToReach += minLand; // need reserves at each landing
+      const wantToBuy = Math.max(0, fuelToReach - fuelOnBoard);
+      targetBuy = Math.min(wantToBuy, maxCanBuy);
+    }
+
+    // Apply: buy at least mustBuy, at most maxCanBuy, target is targetBuy
+    let buy = Math.max(mustBuy, targetBuy);
+    buy = Math.min(buy, maxCanBuy);
+    buy = Math.max(buy, 0);
+
+    // Account for burn penalty: carrying (fuelOnBoard + buy) over this leg
+    const totalFuelAtTakeoff = fuelOnBoard + buy;
+    const extraOverMinimum = Math.max(0, totalFuelAtTakeoff - minRequired);
+    const bp = breguetBurnPenalty(extraOverMinimum, stop.tripFuelToNext, zfw + totalFuelAtTakeoff, burnRate);
+
+    // Fuel remaining after flying this leg (burned trip fuel + penalty)
+    fuelOnBoard = Math.max(0, totalFuelAtTakeoff - stop.tripFuelToNext - bp - stop.altFuel);
+
+    plan.push({
+      airport: stop.airport,
+      buy,         // lbs
+      price: stop.price,
+      cost: buy * stop.price,
+      fuelAfterLeg: fuelOnBoard,
+      burnPenalty: bp,
+      legIndex: i,
+    });
+  }
+
+  const optimalTotalCost = plan.reduce((sum, s) => sum + s.cost, 0);
+  const savings = naiveTotalCost - optimalTotalCost;
+
+  // Convert to display units
+  const planDisplay = plan.map(p => ({
+    airport: p.airport,
+    buy: fromLbs(p.buy, unit),
+    price: p.price,
+    cost: p.cost,
+    fuelAfterLeg: fromLbs(p.fuelAfterLeg, unit),
+    burnPenalty: fromLbs(p.burnPenalty, unit),
+    legIndex: p.legIndex,
+  }));
+
+  const naiveDisplay = naive.map(s => ({
+    airport: s.airport,
+    buy: fromLbs(s.buy, unit),
+    price: s.price,
+    cost: s.buy * s.price,
+  }));
+
+  return {
+    plan: planDisplay,
+    naive: naiveDisplay,
+    optimalTotalCost,
+    naiveTotalCost,
+    savings,
+    finalDestination: legs[legs.length - 1].destination || 'Destination',
+  };
+}
+
 // ─── AIRPORTS DATABASE (with coordinates) ───────────────────────────────────
 const AIRPORTS = [
   { icao: 'KJFK', name: 'John F Kennedy Intl', city: 'New York', lat: 40.6398, lon: -73.7789 },
@@ -1027,6 +1181,142 @@ function RoundTripResultPanel({ rtResult, sym, unit, t }) {
   );
 }
 
+// ─── FUEL PURCHASE PLAN PANEL ─────────────────────────────────────────────────
+function FuelPlanPanel({ fuelPlan, sym, unit, t }) {
+  if (!fuelPlan) return null;
+  const { plan, naive, optimalTotalCost, naiveTotalCost, savings, finalDestination } = fuelPlan;
+  const fmtN = (n, d = 0) => n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
+  const fmtC = (n, d = 2) => `${n < 0 ? '-' : ''}${sym}${fmtN(Math.abs(n), d)}`;
+  const isGood = savings > 0;
+
+  // Chart data: compare naive vs optimal at each stop
+  const chartData = plan.map((p, i) => ({
+    airport: p.airport,
+    optimal: Math.round(p.buy),
+    naive: Math.round(naive[i].buy),
+    price: p.price,
+  }));
+
+  return (
+    <div style={{ gridColumn: '1 / -1', background: t.panelBg, border: `1px solid ${t.border}`, borderRadius: 3, overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ background: t.headerBg, padding: '12px 20px', borderBottom: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '3px', textTransform: 'uppercase', color: t.textSec }}>
+          FUEL PURCHASE PLAN
+        </div>
+        <div style={{
+          background: isGood ? '#0a1e10' : '#1e0a0a',
+          border: `2px solid ${isGood ? '#28a048' : '#a02828'}`,
+          borderRadius: 3, padding: '6px 18px', display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 22, color: isGood ? '#38d068' : '#e04040' }}>{isGood ? '\u2713' : '\u2717'}</span>
+          <div>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 17, fontWeight: 700, letterSpacing: '2px', color: isGood ? '#38d068' : '#e04040' }}>
+              {isGood ? `SAVE ${fmtC(savings)}` : 'NO SAVINGS — BUY AS NEEDED'}
+            </div>
+            <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 10, letterSpacing: '1.5px', color: isGood ? '#28a048' : '#a02828' }}>
+              {isGood ? 'OPTIMIZED VS. BUY-AS-YOU-GO' : 'PRICES ARE SIMILAR ACROSS STOPS'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Purchase plan table */}
+      <div style={{ padding: '0' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr style={{ background: t.headerBg }}>
+              <th style={{ padding: '10px 16px', textAlign: 'left', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted }}>Stop</th>
+              <th style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted }}>Price ({sym}/{unit})</th>
+              <th style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted }}>Buy ({unit})</th>
+              <th style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted }}>Cost</th>
+              <th style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted }}>Naive Cost</th>
+            </tr>
+          </thead>
+          <tbody>
+            {plan.map((p, i) => {
+              const isCheapest = p.price === Math.min(...plan.map(x => x.price));
+              return (
+                <tr key={i} style={{ borderBottom: `1px solid ${t.rowBorder}` }}>
+                  <td style={{ padding: '10px 16px', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 600, letterSpacing: '1px', color: isCheapest ? t.accent : t.text }}>
+                    {p.airport} {isCheapest ? '\u2605' : ''}
+                  </td>
+                  <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: isCheapest ? '#38d068' : t.text }}>
+                    {sym}{fmtN(p.price, 3)}
+                  </td>
+                  <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 13, fontWeight: 700, color: p.buy > 0 ? t.accent : t.textMuted }}>
+                    {fmtN(p.buy, 0)}
+                  </td>
+                  <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.text }}>
+                    {fmtC(p.cost)}
+                  </td>
+                  <td style={{ padding: '10px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.textMuted }}>
+                    {fmtC(naive[i].cost)}
+                  </td>
+                </tr>
+              );
+            })}
+            {/* Totals row */}
+            <tr style={{ background: t.headerBg }}>
+              <td style={{ padding: '13px 16px', fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, fontWeight: 700, letterSpacing: '2px', color: t.text }}>TOTAL</td>
+              <td></td>
+              <td style={{ padding: '13px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 14, fontWeight: 700, color: t.accent }}>
+                {fmtN(plan.reduce((s, p) => s + p.buy, 0), 0)}
+              </td>
+              <td style={{ padding: '13px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 16, fontWeight: 700, color: isGood ? '#38d068' : t.text }}>
+                {fmtC(optimalTotalCost)}
+              </td>
+              <td style={{ padding: '13px 16px', textAlign: 'right', fontFamily: "'Share Tech Mono', monospace", fontSize: 14, color: t.textMuted }}>
+                {fmtC(naiveTotalCost)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Bar chart comparison */}
+      <div style={{ padding: '16px 16px 8px' }}>
+        <div style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '2px', textTransform: 'uppercase', color: t.textMuted, marginBottom: 10 }}>
+          FUEL PURCHASE BY STOP — OPTIMAL vs BUY-AS-YOU-GO
+        </div>
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={chartData} margin={{ top: 4, right: 24, left: 12, bottom: 20 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={t.chartGrid} />
+            <XAxis dataKey="airport" tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Barlow Condensed' }} axisLine={{ stroke: t.chartAxisLine }} tickLine={false} />
+            <YAxis tick={{ fill: t.chartAxis, fontSize: 10, fontFamily: 'Share Tech Mono' }}
+              tickFormatter={v => v >= 1000 ? `${(v / 1000).toFixed(0)}k` : v} axisLine={false} tickLine={false} />
+            <RCTooltip content={<ChartTip sym={sym} t={t} />} />
+            <Legend wrapperStyle={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 11, letterSpacing: '1px' }} />
+            <Bar dataKey="optimal" name="Optimal Plan" fill="#f0a500" radius={[2, 2, 0, 0]} />
+            <Bar dataKey="naive" name="Buy As You Go" fill="#4a5a70" radius={[2, 2, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Savings summary strip */}
+      {savings > 0 && (
+        <div style={{
+          padding: '12px 20px', borderTop: `1px solid ${t.border}`,
+          background: t.summaryBg, display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'center',
+        }}>
+          <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontSize: 12, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', color: t.textMuted }}>
+            SAVINGS BREAKDOWN:
+          </span>
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.textSec }}>
+            Naive: {fmtC(naiveTotalCost)}
+          </span>
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 12, color: t.textSec }}>
+            Optimized: {fmtC(optimalTotalCost)}
+          </span>
+          <span style={{ fontFamily: "'Share Tech Mono', monospace", fontSize: 14, fontWeight: 700, color: '#38d068' }}>
+            You save: {fmtC(savings)} ({naiveTotalCost > 0 ? fmtN(savings / naiveTotalCost * 100, 1) : 0}%)
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── WEIGHT BREAKDOWN CONTENT ────────────────────────────────────────────────
 function WeightBreakdownPanel({ wb, fuelUnit, onUpdate, t }) {
   const setWB = (k, v) => onUpdate(k, v);
@@ -1190,6 +1480,9 @@ function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveL
             <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.priceDest} onChange={e => setLNum('priceDest', e.target.value)} />
           </Field>
         </Row2>
+        <Field label={`Min Fuel Purchase at Departure (${unit})`} tip="Minimum gallons you must buy at this stop (e.g. FBO minimum to waive ramp fees). The optimizer will account for this requirement." t={t}>
+          <input style={mkInputStyle(t)} type="number" value={leg.minPurchaseReq} onChange={e => setLNum('minPurchaseReq', e.target.value)} />
+        </Field>
       </div>
 
       {/* Regulatory per-leg */}
@@ -1226,14 +1519,9 @@ function LegCard({ leg, index, totalLegs, shared, errors, onUpdateLeg, onRemoveL
                 <input style={mkInputStyle(t)} type="number" step={0.001} value={leg.fboSurchargeDest} onChange={e => setLNum('fboSurchargeDest', e.target.value)} />
               </Field>
             </Row2>
-            <Row2>
-              <Field label={`Min Purchase (${unit})`} tip="Some FBOs require a minimum fuel purchase to waive ramp/parking fees. If tankering means you buy less at the destination, you may still need to meet this minimum." t={t}>
-                <input style={mkInputStyle(t)} type="number" value={leg.minPurchaseReq} onChange={e => setLNum('minPurchaseReq', e.target.value)} />
-              </Field>
-              <Field label={`Ramp Fee (${sym})`} tip="Fee waived if minimum fuel purchase is met at destination." t={t}>
-                <input style={mkInputStyle(t)} type="number" value={leg.rampFee} onChange={e => setLNum('rampFee', e.target.value)} />
-              </Field>
-            </Row2>
+            <Field label={`Ramp Fee (${sym})`} tip="Fee waived if minimum fuel purchase is met at destination." t={t}>
+              <input style={mkInputStyle(t)} type="number" value={leg.rampFee} onChange={e => setLNum('rampFee', e.target.value)} />
+            </Field>
             <Row2>
               <Field label="Contingency (%)" tip="Extra fuel carried as a percentage of trip fuel for safety margin. Typical: 3-5%." t={t}>
                 <InputWithSuffix type="number" suffix="%" min={0} max={15} step={0.5} value={leg.contingencyPct} onChange={e => setLNum('contingencyPct', e.target.value)} placeholder="0" t={t} />
@@ -1254,6 +1542,7 @@ export default function TankeringTool() {
   const [state, setState] = useState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
   const [results, setResults] = useState(null);
   const [roundTripResult, setRoundTripResult] = useState(null);
+  const [fuelPlan, setFuelPlan] = useState(null);
   const [errors, setErrors] = useState({});
   const [unitSys, setUnitSys] = useState('imperial');
   const [theme, setTheme] = useState('dark');
@@ -1387,7 +1676,7 @@ export default function TankeringTool() {
       Object.assign(allErrors, validateLeg(state, leg, i));
     });
     setErrors(allErrors);
-    if (Object.keys(allErrors).length) { setResults(null); setRoundTripResult(null); return; }
+    if (Object.keys(allErrors).length) { setResults(null); setRoundTripResult(null); setFuelPlan(null); return; }
     const legResults = state.legs.map(leg => runCalc(state, leg));
     setResults(legResults);
 
@@ -1402,12 +1691,20 @@ export default function TankeringTool() {
       }
     }
     setRoundTripResult(rtResult);
+
+    // Multi-leg fuel purchase plan
+    if (state.legs.length >= 2) {
+      setFuelPlan(buildFuelPurchasePlan(state, state.legs));
+    } else {
+      setFuelPlan(null);
+    }
   }, [state]);
 
   const handleReset = useCallback(() => {
     setState({ ...INITIAL_STATE, legs: [createLeg('KHOU')] });
     setResults(null);
     setRoundTripResult(null);
+    setFuelPlan(null);
     setErrors({});
     setUnitSys('imperial');
   }, []);
@@ -1653,7 +1950,7 @@ export default function TankeringTool() {
                   </Field>
                 </Row2>
                 <Row2>
-                  <Field label={`Min Purchase (${unit})`} tip="Minimum fuel buy to waive ramp fees at destination." t={t}>
+                  <Field label={`Min Fuel Purchase (${unit})`} tip="Minimum fuel you must buy at departure (e.g. FBO minimum to waive ramp fees). The fuel plan optimizer accounts for this." t={t}>
                     <input style={mkInputStyle(t)} type="number" value={leg0.minPurchaseReq} onChange={e => setL0Num('minPurchaseReq', e.target.value)} />
                   </Field>
                   <Field label={`Ramp Fee (${sym})`} tip="Fee waived if minimum fuel purchase is met." t={t}>
@@ -1841,6 +2138,11 @@ export default function TankeringTool() {
           {results && results.map((res, i) => (
             <ResultsPanel key={i} res={res} leg={state.legs[i]} shared={state} sym={sym} t={t} legIndex={i} totalLegs={state.legs.length} />
           ))}
+
+          {/* FUEL PURCHASE PLAN (multi-leg) */}
+          {fuelPlan && (
+            <FuelPlanPanel fuelPlan={fuelPlan} sym={sym} unit={unit} t={t} />
+          )}
 
           {/* ROUND-TRIP ANALYSIS */}
           {roundTripResult && (
