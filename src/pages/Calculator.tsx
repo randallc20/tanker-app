@@ -2,7 +2,7 @@
  * Calculator — CJ4 Fuel Tankering Analysis
  *
  * Combo inputs: dropdown presets you can click OR type custom values.
- * Results auto-calculate on every change.
+ * Results auto-calculate on every change. Supports light/dark theme.
  * Data from Cessna CJ4 Flight Planning Guide with bilinear interpolation.
  */
 
@@ -15,31 +15,10 @@ import type { TankeringResult, CruiseMode } from '../data/types'
 import { listAircraft, getAircraft } from '../data/aircraft_registry'
 import { calculateTankering, sensitivitySweep } from '../engine/tankering_calc'
 import { isaTemperature } from '../engine/temperature_correction'
-
-/* ─── DESIGN ────────────────────────────────────────────────────────────── */
-const c = {
-  bg:      '#0f1117',
-  card:    '#181b23',
-  cardAlt: '#1e222c',
-  border:  '#2a2e3a',
-  input:   '#13151d',
-  text:    '#e8eaf0',
-  sub:     '#9ca3b4',
-  muted:   '#5c6478',
-  accent:  '#3b82f6',
-  green:   '#22c55e',
-  red:     '#ef4444',
-  amber:   '#f59e0b',
-}
+import { useTheme, type Colors } from '../theme'
 
 const fmt = (n: number, d = 0) =>
   n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d })
-
-const baseInput: React.CSSProperties = {
-  width: '100%', background: c.input, border: `1px solid ${c.border}`, borderRadius: 8,
-  padding: '10px 12px', fontSize: 14, color: c.text, outline: 'none',
-}
-const selectStyle: React.CSSProperties = { ...baseInput, appearance: 'none', paddingRight: 28, cursor: 'pointer' }
 
 /* ─── PRESET OPTIONS ────────────────────────────────────────────────────── */
 const distPresets = [100, 150, 200, 250, 300, 400, 500, 600, 750, 1000, 1250, 1500]
@@ -53,41 +32,40 @@ const pricePresets = (() => {
 const windPresets = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
 const densityPresets = [6.5, 6.6, 6.7, 6.75, 6.8, 6.9, 7.0]
 
-/* ─── COMBO INPUT: dropdown presets + free typing ───────────────────────── */
-function ComboField({ label, id, value, onChange, presets, suffix, step }: {
+/* ─── STYLED HELPERS (theme-aware) ──────────────────────────────────────── */
+function inputStyle(c: Colors): React.CSSProperties {
+  return {
+    width: '100%', background: c.input, border: `1px solid ${c.border}`, borderRadius: 8,
+    padding: '10px 12px', fontSize: 14, color: c.text, outline: 'none',
+  }
+}
+function selectStyle(c: Colors): React.CSSProperties {
+  return { ...inputStyle(c), appearance: 'none', paddingRight: 28, cursor: 'pointer' }
+}
+
+function ComboField({ label, id, value, onChange, presets, suffix, c }: {
   label: string; id: string; value: string;
   onChange: (v: string) => void; presets: (string | number)[];
-  suffix?: string; step?: string
+  suffix?: string; c: Colors
 }) {
   return (
     <div>
       <label htmlFor={id} style={{ display: 'block', marginBottom: 6, fontSize: 13, fontWeight: 500, color: c.sub }}>
         {label}
       </label>
-      <div style={{ position: 'relative' }}>
-        <input
-          id={id}
-          list={`${id}-list`}
-          type="text"
-          inputMode="decimal"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          style={baseInput}
-          autoComplete="off"
-        />
-        <datalist id={`${id}-list`}>
-          {presets.map(p => (
-            <option key={p} value={String(p)}>
-              {suffix ? `${p} ${suffix}` : String(p)}
-            </option>
-          ))}
-        </datalist>
-      </div>
+      <input id={id} list={`${id}-list`} type="text" inputMode="decimal"
+        value={value} onChange={e => onChange(e.target.value)}
+        style={inputStyle(c)} autoComplete="off" />
+      <datalist id={`${id}-list`}>
+        {presets.map(p => (
+          <option key={p} value={String(p)}>{suffix ? `${p} ${suffix}` : String(p)}</option>
+        ))}
+      </datalist>
     </div>
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, c, children }: { label: string; c: Colors; children: React.ReactNode }) {
   return (
     <div>
       <label style={{ display: 'block', marginBottom: 6, fontSize: 13, fontWeight: 500, color: c.sub }}>{label}</label>
@@ -96,8 +74,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Collapsible({ title, children, defaultOpen = false }: {
-  title: string; children: React.ReactNode; defaultOpen?: boolean
+function Collapsible({ title, c, children, defaultOpen = false }: {
+  title: string; c: Colors; children: React.ReactNode; defaultOpen?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
@@ -115,10 +93,10 @@ function Collapsible({ title, children, defaultOpen = false }: {
   )
 }
 
-function ChartTooltip({ active, payload }: any) {
+function ChartTooltip({ active, payload, c }: any) {
   if (!active || !payload?.length) return null
   return (
-    <div style={{ background: c.cardAlt, border: `1px solid ${c.border}`, borderRadius: 8, padding: '8px 14px', fontSize: 13 }}>
+    <div style={{ background: c?.cardAlt || '#1e222c', border: `1px solid ${c?.border || '#2a2e3a'}`, borderRadius: 8, padding: '8px 14px', fontSize: 13 }}>
       {payload.map((p: any) => (
         <div key={p.name} style={{ color: p.color, marginBottom: 2 }}>
           {p.name}: {typeof p.value === 'number' ? `$${p.value.toFixed(2)}` : p.value}
@@ -132,6 +110,7 @@ function ChartTooltip({ active, payload }: any) {
    CALCULATOR
    ═══════════════════════════════════════════════════════════════════════════ */
 export default function Calculator() {
+  const { colors: c } = useTheme()
   const acList = listAircraft()
   const [aircraftId, setAircraftId] = useState('cj4_525c')
   const [mode, setMode] = useState<CruiseMode>('hsc')
@@ -163,7 +142,6 @@ export default function Calculator() {
   const isaT = isaTemperature(alt)
   const forecastTemp = tempSel === 'ISA' ? null : isaT + parseFloat(tempSel)
 
-  // Auto-calculate on every change
   const result: TankeringResult | null = useMemo(() => {
     if (!distN || !weightN || !origN || !destN) return null
     try {
@@ -198,94 +176,73 @@ export default function Calculator() {
     <div style={{ minHeight: '100vh', background: c.bg, color: c.text }}>
       <div style={{ maxWidth: 960, margin: '0 auto', padding: '28px 20px 48px' }}>
 
-        {/* Header */}
-        <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4 }}>Fuel Tankering Calculator</h1>
+        <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4, color: c.text }}>Fuel Tankering Calculator</h1>
         <p style={{ fontSize: 14, color: c.muted, marginBottom: 24 }}>
           Should you carry extra fuel from a cheaper airport? Pick a preset or type your own values.
         </p>
 
-        {/* ═══ ALL INPUTS ═══ */}
-        <div style={{
-          background: c.card, border: `1px solid ${c.border}`, borderRadius: 12,
-          padding: 24, marginBottom: 24,
-        }}>
+        {/* ═══ INPUTS ═══ */}
+        <div style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 24, marginBottom: 24 }}>
 
-          {/* Row 1: Aircraft, Altitude, Cruise Mode */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <Field label="Aircraft">
-              <select style={selectStyle} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
+            <Field label="Aircraft" c={c}>
+              <select style={selectStyle(c)} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
                 {acList.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}
               </select>
             </Field>
-            <Field label="Cruise Altitude">
-              <select style={selectStyle} value={alt} onChange={e => setAlt(+e.target.value)}>
+            <Field label="Cruise Altitude" c={c}>
+              <select style={selectStyle(c)} value={alt} onChange={e => setAlt(+e.target.value)}>
                 {alts.map(a => <option key={a} value={a}>FL{a / 100} ({a.toLocaleString()} ft)</option>)}
               </select>
             </Field>
-            <Field label="Cruise Mode">
-              <select style={selectStyle} value={mode} onChange={e => setMode(e.target.value as CruiseMode)}>
+            <Field label="Cruise Mode" c={c}>
+              <select style={selectStyle(c)} value={mode} onChange={e => setMode(e.target.value as CruiseMode)}>
                 <option value="hsc">High Speed Cruise (HSC)</option>
                 <option value="lrc">Long Range Cruise (LRC)</option>
               </select>
             </Field>
           </div>
 
-          {/* Row 2: Distance, Weight, Tanker Amount */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <ComboField label="Trip Distance (NM)" id="dist" value={dist} onChange={setDist}
-              presets={distPresets} suffix="NM" />
-            <ComboField label="Cruise Weight (lb)" id="weight" value={weight} onChange={setWeight}
-              presets={weightPresets} suffix="lb" />
+            <ComboField label="Trip Distance (NM)" id="dist" value={dist} onChange={setDist} presets={distPresets} suffix="NM" c={c} />
+            <ComboField label="Cruise Weight (lb)" id="weight" value={weight} onChange={setWeight} presets={weightPresets} suffix="lb" c={c} />
             <div>
               <ComboField label="Extra Fuel to Carry (gal)" id="tanker" value={tankerGal} onChange={setTankerGal}
-                presets={tankerPresets.filter(g => g <= maxTankGal + 5 || g === 0)} suffix="gal" />
+                presets={tankerPresets.filter(g => g <= maxTankGal + 5 || g === 0)} suffix="gal" c={c} />
               <div style={{ fontSize: 11, color: c.muted, marginTop: 4 }}>
                 = {fmt(tLb, 0)} lb &middot; max {fmt(maxTankGal, 0)} gal
               </div>
             </div>
           </div>
 
-          {/* Row 3: Origin Price, Dest Price */}
           <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <ComboField label="Fuel Price at Origin ($/gal)" id="porig" value={pOrig} onChange={setPOrig}
-              presets={pricePresets} step="0.01" />
-            <ComboField label="Fuel Price at Destination ($/gal)" id="pdest" value={pDest} onChange={setPDest}
-              presets={pricePresets} step="0.01" />
+            <ComboField label="Fuel Price at Origin ($/gal)" id="porig" value={pOrig} onChange={setPOrig} presets={pricePresets} c={c} />
+            <ComboField label="Fuel Price at Destination ($/gal)" id="pdest" value={pDest} onChange={setPDest} presets={pricePresets} c={c} />
           </div>
 
-          {/* Row 4: Wind, Temp, Density */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
-            <ComboField label="Wind Component (kt)" id="wind" value={wind} onChange={setWind}
-              presets={windPresets} suffix="kt" />
-            <Field label="Temperature">
-              <select style={selectStyle} value={tempSel} onChange={e => setTempSel(e.target.value)}>
+            <ComboField label="Wind Component (kt)" id="wind" value={wind} onChange={setWind} presets={windPresets} suffix="kt" c={c} />
+            <Field label="Temperature" c={c}>
+              <select style={selectStyle(c)} value={tempSel} onChange={e => setTempSel(e.target.value)}>
                 <option value="ISA">ISA (standard: {isaT.toFixed(0)}°C)</option>
                 {['-20', '-15', '-10', '-5', '+5', '+10', '+15', '+20'].map(t => (
                   <option key={t} value={t}>ISA {t}°C</option>
                 ))}
               </select>
             </Field>
-            <ComboField label="Fuel Density (lb/gal)" id="density" value={density} onChange={setDensity}
-              presets={densityPresets} suffix="lb/gal" />
+            <ComboField label="Fuel Density (lb/gal)" id="density" value={density} onChange={setDensity} presets={densityPresets} suffix="lb/gal" c={c} />
           </div>
         </div>
 
         {/* ═══ SUMMARY BAR ═══ */}
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24,
-          marginBottom: 24, flexWrap: 'wrap', fontSize: 14, color: c.sub,
-        }}>
-          <span>
-            Carrying <strong style={{ color: c.text }}>{tankerN} gal</strong> ({fmt(tLb, 0)} lb) extra
-          </span>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 24, flexWrap: 'wrap', fontSize: 14, color: c.sub }}>
+          <span>Carrying <strong style={{ color: c.text }}>{tankerN} gal</strong> ({fmt(tLb, 0)} lb) extra</span>
           <span>
             Price diff: <strong style={{ color: priceDiff > 0 ? c.green : priceDiff < 0 ? c.red : c.muted }}>
               {priceDiff >= 0 ? '+' : ''}{priceDiff.toFixed(2)}/gal
             </strong>
           </span>
-          <span>
-            Mode: <strong style={{ color: c.text }}>{mode === 'hsc' ? 'High Speed' : 'Long Range'}</strong>
-          </span>
+          <span>Mode: <strong style={{ color: c.text }}>{mode === 'hsc' ? 'High Speed' : 'Long Range'}</strong></span>
           {overMTOW && <strong style={{ color: c.red }}>Over MTOW!</strong>}
         </div>
 
@@ -326,20 +283,16 @@ export default function Calculator() {
                 { label: 'Fuel penalty', value: `${fmt(r.penaltyPct, 1)}%`, color: c.amber },
                 { label: 'Break-even price diff', value: `$${fmt(r.breakEvenPriceDiff, 2)}/gal`, color: c.sub },
               ].map(m => (
-                <div key={m.label} style={{
-                  background: c.card, border: `1px solid ${c.border}`, borderRadius: 12,
-                  padding: 18, textAlign: 'center',
-                }}>
+                <div key={m.label} style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 18, textAlign: 'center' }}>
                   <p style={{ fontSize: 12, color: c.muted, marginBottom: 8 }}>{m.label}</p>
                   <p style={{ fontSize: 20, fontWeight: 700, color: m.color }}>{m.value}</p>
                 </div>
               ))}
             </div>
 
-            {/* Fuel flow + Chart side by side */}
+            {/* Fuel flow + Chart */}
             <div className="results-2col" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
 
-              {/* Fuel flow */}
               <div style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 20 }}>
                 <h3 style={{ fontSize: 14, fontWeight: 600, color: c.sub, marginBottom: 16 }}>Fuel Burn Comparison</h3>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'center', marginBottom: 16 }}>
@@ -372,7 +325,6 @@ export default function Calculator() {
                 </div>
               </div>
 
-              {/* Chart */}
               <div style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 20 }}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
                   <h3 style={{ fontSize: 14, fontWeight: 600, color: c.sub }}>What-If Analysis</h3>
@@ -385,7 +337,7 @@ export default function Calculator() {
                       <button key={s.k} onClick={() => setSensType(s.k)} style={{
                         padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 600,
                         cursor: 'pointer', border: `1px solid ${sensType === s.k ? c.accent : c.border}`,
-                        background: sensType === s.k ? 'rgba(59,130,246,0.1)' : 'transparent',
+                        background: sensType === s.k ? `${c.accent}18` : 'transparent',
                         color: sensType === s.k ? c.accent : c.muted,
                       }}>{s.l}</button>
                     ))}
@@ -404,7 +356,7 @@ export default function Calculator() {
                       tickFormatter={v => sensType === 'priceDiff' ? `$${v.toFixed(1)}` : sensType === 'wind' ? `${v}kt` : `${v.toFixed(0)}g`} />
                     <YAxis tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false}
                       tickFormatter={v => `$${v.toFixed(0)}`} width={40} />
-                    <RCTooltip content={<ChartTooltip />} />
+                    <RCTooltip content={<ChartTooltip c={c} />} />
                     <ReferenceLine y={0} stroke={c.muted} strokeDasharray="4 4" />
                     <Area type="monotone" dataKey="netSavings" name="Net Savings" stroke={c.accent} strokeWidth={2} fill="url(#savGrad)" />
                   </AreaChart>
@@ -413,7 +365,7 @@ export default function Calculator() {
             </div>
 
             {/* Trip Details */}
-            <Collapsible title="Detailed Breakdown">
+            <Collapsible title="Detailed Breakdown" c={c}>
               <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 2 }}>
                 {[
                   ['Cruise distance', `${fmt(r.effectiveCruiseNM, 0)} NM`],
@@ -430,8 +382,7 @@ export default function Calculator() {
                 ].map(([k, v], i) => (
                   <div key={i} style={{
                     background: i % 2 === 0 ? c.cardAlt : 'transparent',
-                    padding: '8px 14px', borderRadius: 6,
-                    display: 'flex', justifyContent: 'space-between',
+                    padding: '8px 14px', borderRadius: 6, display: 'flex', justifyContent: 'space-between',
                   }}>
                     <span style={{ fontSize: 13, color: c.muted }}>{k}</span>
                     <span style={{ fontSize: 13, fontWeight: 600, color: c.text }}>{v}</span>
@@ -440,9 +391,8 @@ export default function Calculator() {
               </div>
             </Collapsible>
 
-            {/* Rule of Thumb */}
             {r.ruleOfThumb && (
-              <Collapsible title="vs. Simple 150 gal/hr Estimate">
+              <Collapsible title="vs. Simple 150 gal/hr Estimate" c={c}>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
                   <div style={{ background: c.cardAlt, borderRadius: 10, padding: 18, textAlign: 'center' }}>
                     <p style={{ fontSize: 13, color: c.muted, marginBottom: 6 }}>Simple Estimate</p>

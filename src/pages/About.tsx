@@ -5,27 +5,25 @@
  * and its limitations — in plain English for pilots and dispatchers.
  */
 
-const C = {
-  bg: '#0c0f16', panel: '#141820', header: '#1a2030',
-  border: '#1e2a3a', text: '#dde3f0', sec: '#8a9ab8',
-  muted: '#506880', accent: '#f0a500',
-}
+import { useTheme } from '../theme'
 
 export default function About() {
+  const { colors: c } = useTheme()
+
   const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-    <div className="rounded overflow-hidden mb-4" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="px-5 py-3" style={{ background: C.header, borderBottom: `1px solid ${C.border}` }}>
-        <h2 className="text-sm font-bold tracking-[2px] uppercase" style={{ color: C.sec }}>{title}</h2>
+    <div className="rounded-lg overflow-hidden mb-4" style={{ background: c.card, border: `1px solid ${c.border}` }}>
+      <div className="px-5 py-3" style={{ background: c.cardAlt, borderBottom: `1px solid ${c.border}` }}>
+        <h2 className="text-sm font-bold" style={{ color: c.sub }}>{title}</h2>
       </div>
-      <div className="px-5 py-4 text-sm leading-relaxed" style={{ color: C.sec }}>{children}</div>
+      <div className="px-5 py-4 text-sm leading-relaxed" style={{ color: c.sub }}>{children}</div>
     </div>
   )
 
   return (
-    <div className="min-h-screen" style={{ background: C.bg }}>
-      <header className="px-6 py-4" style={{ borderBottom: `1px solid ${C.border}` }}>
-        <h1 className="text-xl font-bold tracking-[4px] uppercase" style={{ color: C.accent }}>
-          METHODOLOGY & DATA SOURCES
+    <div className="min-h-screen" style={{ background: c.bg }}>
+      <header className="px-6 py-4" style={{ borderBottom: `1px solid ${c.border}` }}>
+        <h1 className="text-xl font-bold" style={{ color: c.text }}>
+          Methodology & Data Sources
         </h1>
       </header>
 
@@ -44,19 +42,19 @@ export default function About() {
             dramatically based on:
           </p>
           <ul className="list-disc pl-5 mb-3 space-y-1">
-            <li><strong>Cruise mode:</strong> At High Speed Cruise (HSC), the CJ4's fuel flow barely changes
+            <li><strong style={{ color: c.text }}>Cruise mode:</strong> At High Speed Cruise (HSC), the CJ4's fuel flow barely changes
               with weight — only 13 lb/hr across the full weight range at FL390. At Long Range Cruise (LRC),
               it changes by 313 lb/hr. This is the single most important insight.</li>
-            <li><strong>Trip distance:</strong> Longer legs = more time carrying extra weight = more penalty.</li>
-            <li><strong>Altitude:</strong> Different altitudes have different fuel flow curves.</li>
-            <li><strong>Wind:</strong> Headwinds extend trip time, increasing the penalty.</li>
-            <li><strong>Temperature:</strong> Hot days increase fuel flow ~0.3% per °C above ISA.</li>
+            <li><strong style={{ color: c.text }}>Trip distance:</strong> Longer legs = more time carrying extra weight = more penalty.</li>
+            <li><strong style={{ color: c.text }}>Altitude:</strong> Different altitudes have different fuel flow curves.</li>
+            <li><strong style={{ color: c.text }}>Wind:</strong> Headwinds extend trip time, increasing the penalty.</li>
+            <li><strong style={{ color: c.text }}>Temperature:</strong> Hot days increase fuel flow ~0.3% per °C above ISA.</li>
           </ul>
         </Section>
 
         <Section title="Data Source">
           <p className="mb-2">
-            All performance data comes from the <strong>Cessna CJ4 Flight Planning Guide</strong>
+            All performance data comes from the <strong style={{ color: c.text }}>Cessna CJ4 Flight Planning Guide</strong>
             (September 2012, Revisions FM-04 PP-03), derived from the CJ4 Aircraft Flight Manual
             and Electronic Operating Manual.
           </p>
@@ -64,7 +62,7 @@ export default function About() {
             The tool uses actual fuel flow tables at 6 weight columns and 16 altitude rows for both
             HSC and LRC modes. Values are bilinearly interpolated — no rounding or snapping to nearest.
           </p>
-          <p style={{ color: C.accent }}>
+          <p style={{ color: c.accent }}>
             This tool is for planning purposes only. Always verify with current approved AFM/POH data.
           </p>
         </Section>
@@ -83,11 +81,11 @@ export default function About() {
 
         <Section title="Wind & Temperature Corrections">
           <p className="mb-3">
-            <strong>Wind:</strong> The POH includes a wind correction factor table. A 50-knot headwind at 420 KTAS
+            <strong style={{ color: c.text }}>Wind:</strong> The POH includes a wind correction factor table. A 50-knot headwind at 420 KTAS
             increases trip time by ~13%. This factor is interpolated for your exact airspeed and wind component.
           </p>
           <p className="mb-3">
-            <strong>Temperature:</strong> All POH data assumes ISA conditions. For non-ISA days, fuel flow is
+            <strong style={{ color: c.text }}>Temperature:</strong> All POH data assumes ISA conditions. For non-ISA days, fuel flow is
             corrected +0.3% per °C above ISA and -0.2% per °C below ISA, capped at ±15%.
           </p>
         </Section>
@@ -104,12 +102,12 @@ export default function About() {
 
         <Section title="HSC vs LRC — The Critical Insight">
           <p className="mb-3">
-            At <strong>High Speed Cruise</strong>, the engines run at maximum cruise thrust regardless of weight.
+            At <strong style={{ color: c.text }}>High Speed Cruise</strong>, the engines run at maximum cruise thrust regardless of weight.
             Lighter aircraft simply accelerate to higher speeds. The fuel flow is determined primarily by the
             thrust setting, not the weight. Result: the tankering penalty is negligible at HSC.
           </p>
           <p className="mb-3">
-            At <strong>Long Range Cruise</strong>, the engines throttle back to optimize fuel efficiency.
+            At <strong style={{ color: c.text }}>Long Range Cruise</strong>, the engines throttle back to optimize fuel efficiency.
             Heavier aircraft need more thrust to maintain speed, so fuel flow increases significantly with weight.
             Result: the tankering penalty is substantial at LRC and can make or break the economics.
           </p>
