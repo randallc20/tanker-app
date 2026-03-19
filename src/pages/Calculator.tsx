@@ -1,13 +1,13 @@
 /**
  * Calculator — CJ4 Fuel Tankering Analysis
  *
- * Compact, professional EFB-style UI. Inputs on left, live results on right.
+ * Clean, readable UI. Inputs on left, live results on right.
  * All data from Cessna CJ4 Flight Planning Guide with bilinear interpolation.
  */
 
-import React, { useState, useMemo, useCallback, useRef } from 'react'
+import React, { useState, useMemo, useCallback } from 'react'
 import {
-  AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid,
+  AreaChart, Area, XAxis, YAxis, CartesianGrid,
   Tooltip as RCTooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import type { TankeringInputs, TankeringResult, CruiseMode } from '../data/types'
@@ -15,113 +15,78 @@ import { listAircraft, getAircraft } from '../data/aircraft_registry'
 import { calculateTankering, sensitivitySweep } from '../engine/tankering_calc'
 import { isaTemperature } from '../engine/temperature_correction'
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   DESIGN TOKENS
-   ═══════════════════════════════════════════════════════════════════════════ */
-const t = {
-  bg:      '#080b12',
-  surface: '#0e1219',
-  panel:   '#111820',
-  raised:  '#161e2a',
-  border:  '#1c2638',
-  glow:    '#1a2540',
-  input:   '#0a0e16',
-  text:    '#e0e6f0',
-  sub:     '#8899b2',
-  dim:     '#4a5a72',
-  amber:   '#f0a500',
-  amberDim:'#705000',
-  green:   '#00e070',
-  greenDim:'#003820',
-  red:     '#ff4060',
-  redDim:  '#3a0a14',
-  blue:    '#4db8ff',
-  grid:    '#141c28',
+/* ─── DESIGN TOKENS ─────────────────────────────────────────────────────── */
+const c = {
+  bg:      '#0f1117',
+  card:    '#181b23',
+  cardAlt: '#1e222c',
+  border:  '#2a2e3a',
+  input:   '#13151d',
+  text:    '#e8eaf0',
+  sub:     '#9ca3b4',
+  muted:   '#5c6478',
+  accent:  '#3b82f6',
+  green:   '#22c55e',
+  red:     '#ef4444',
+  amber:   '#f59e0b',
 }
 
-const mono = "'Share Tech Mono', monospace"
-const sans = "'Barlow Condensed', sans-serif"
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   PRIMITIVES
-   ═══════════════════════════════════════════════════════════════════════════ */
-const fmtN = (n: number, d = 0) =>
+/* ─── HELPERS ───────────────────────────────────────────────────────────── */
+const fmt = (n: number, d = 0) =>
   n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d })
 
-const fmtD = (n: number) => {
-  if (Math.abs(n) >= 1000) return `$${(n / 1000).toFixed(1)}k`
-  return `$${n.toFixed(n >= 100 ? 0 : 2)}`
-}
-
-function Lbl({ children, tip }: { children: React.ReactNode; tip?: string }) {
-  const [show, setShow] = useState(false)
-  const ref = useRef<HTMLSpanElement>(null)
-  const [pos, setPos] = useState({ top: 0, left: 0 })
+function Label({ children, hint }: { children: React.ReactNode; hint?: string }) {
   return (
-    <div style={{ fontFamily: sans, fontSize: 10, fontWeight: 600, letterSpacing: 1.8, textTransform: 'uppercase', color: t.dim, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+    <label style={{ display: 'block', marginBottom: 5, fontSize: 13, fontWeight: 500, color: c.sub }}>
       {children}
-      {tip && (
-        <span style={{ position: 'relative', display: 'inline-flex' }}>
-          <span ref={ref} style={{ cursor: 'help', color: t.amber, fontSize: 11 }}
-            onMouseEnter={() => { if (ref.current) { const r = ref.current.getBoundingClientRect(); setPos({ top: r.bottom + 6, left: Math.min(Math.max(r.left - 110, 8), window.innerWidth - 260) }) }; setShow(true) }}
-            onMouseLeave={() => setShow(false)}>ⓘ</span>
-          {show && <span style={{ position: 'fixed', zIndex: 99999, top: pos.top, left: pos.left, width: 240, background: t.raised, color: t.sub, border: `1px solid ${t.border}`, borderRadius: 4, padding: '8px 12px', fontSize: 11, lineHeight: 1.5, fontFamily: sans, fontWeight: 400, boxShadow: '0 8px 32px rgba(0,0,0,0.7)', pointerEvents: 'none', letterSpacing: 0, textTransform: 'none' }}>{tip}</span>}
-        </span>
-      )}
-    </div>
+      {hint && <span style={{ marginLeft: 6, fontSize: 11, color: c.muted }} title={hint}>?</span>}
+    </label>
   )
 }
 
-const inp: React.CSSProperties = {
-  width: '100%', background: t.input, border: `1px solid ${t.border}`, borderRadius: 4,
-  padding: '7px 10px', fontFamily: mono, fontSize: 13, color: t.text, outline: 'none',
+const inputStyle: React.CSSProperties = {
+  width: '100%', background: c.input, border: `1px solid ${c.border}`, borderRadius: 8,
+  padding: '10px 12px', fontSize: 14, color: c.text, outline: 'none',
 }
-const sel: React.CSSProperties = { ...inp, appearance: 'none', paddingRight: 24 }
+const selectStyle: React.CSSProperties = { ...inputStyle, appearance: 'none', paddingRight: 28 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   STAT PILL — key metric display
-   ═══════════════════════════════════════════════════════════════════════════ */
-function Stat({ label, value, sub, color, large }: {
-  label: string; value: string; sub?: string; color?: string; large?: boolean
-}) {
+function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return (
-    <div style={{ textAlign: 'center', padding: large ? '12px 8px' : '8px 6px' }}>
-      <div style={{ fontFamily: sans, fontSize: 9, fontWeight: 600, letterSpacing: 1.6, textTransform: 'uppercase', color: t.dim, marginBottom: 3 }}>{label}</div>
-      <div style={{ fontFamily: mono, fontSize: large ? 28 : 16, fontWeight: 700, color: color || t.text, lineHeight: 1.1 }}>{value}</div>
-      {sub && <div style={{ fontFamily: mono, fontSize: 10, color: t.dim, marginTop: 2 }}>{sub}</div>}
+    <div style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 20, ...style }}>
+      {children}
     </div>
   )
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   COLLAPSIBLE SECTION
-   ═══════════════════════════════════════════════════════════════════════════ */
-function Section({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
+function CardHeader({ children }: { children: React.ReactNode }) {
+  return <h3 style={{ fontSize: 14, fontWeight: 600, color: c.sub, marginBottom: 14 }}>{children}</h3>
+}
+
+function Collapsible({ title, children, defaultOpen = false }: { title: string; children: React.ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, overflow: 'hidden', marginBottom: 8 }}>
+    <Card style={{ padding: 0 }}>
       <button onClick={() => setOpen(!open)} style={{
-        width: '100%', display: 'flex', alignItems: 'center', gap: 8, padding: '10px 14px', cursor: 'pointer',
-        background: open ? t.raised : 'transparent', border: 'none',
-        borderBottom: open ? `1px solid ${t.border}` : 'none',
+        width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '14px 20px', cursor: 'pointer', background: 'transparent', border: 'none',
+        borderBottom: open ? `1px solid ${c.border}` : 'none',
       }}>
-        <span style={{ fontSize: 8, color: t.amber, transition: 'transform 0.15s', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>▶</span>
-        <span style={{ fontFamily: sans, fontSize: 11, fontWeight: 700, letterSpacing: 2.5, textTransform: 'uppercase', color: t.sub }}>{title}</span>
+        <span style={{ fontSize: 14, fontWeight: 600, color: c.sub }}>{title}</span>
+        <span style={{ fontSize: 12, color: c.muted, transition: 'transform 0.2s', transform: open ? 'rotate(180deg)' : 'rotate(0deg)' }}>▼</span>
       </button>
-      {open && <div style={{ padding: 14 }}>{children}</div>}
-    </div>
+      {open && <div style={{ padding: 20 }}>{children}</div>}
+    </Card>
   )
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   CHART TOOLTIP
-   ═══════════════════════════════════════════════════════════════════════════ */
-function CTip({ active, payload }: any) {
+function ChartTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null
   return (
-    <div style={{ background: t.raised, border: `1px solid ${t.border}`, borderRadius: 4, padding: '6px 10px', fontSize: 11, fontFamily: mono }}>
+    <div style={{ background: c.cardAlt, border: `1px solid ${c.border}`, borderRadius: 8, padding: '8px 14px', fontSize: 13 }}>
       {payload.map((p: any) => (
-        <div key={p.name} style={{ color: p.color }}>{p.name}: {typeof p.value === 'number' ? `$${p.value.toFixed(2)}` : p.value}</div>
+        <div key={p.name} style={{ color: p.color, marginBottom: 2 }}>
+          {p.name}: {typeof p.value === 'number' ? `$${p.value.toFixed(2)}` : p.value}
+        </div>
       ))}
     </div>
   )
@@ -190,351 +155,367 @@ export default function Calculator() {
     }, sensType, 40)
   }, [result, sensType, aircraftId, mode, alt, dist, w, tLb, wind, temp, depElev, pOrig, pDest, fd, descDist])
 
-  const r = result // alias
+  const r = result
   const isaT = isaTemperature(alt)
 
-  /* ─── RENDER ─────────────────────────────────────────────────────────── */
+  /* ─── RENDER ────────────────────────────────────────────────────────── */
   return (
-    <div style={{ minHeight: '100vh', background: t.bg, fontFamily: sans, color: t.text }}>
+    <div style={{ minHeight: '100vh', background: c.bg, color: c.text }}>
 
-      {/* ═══ TOP BAR ═══ */}
-      <div style={{ background: t.surface, borderBottom: `1px solid ${t.border}`, padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12 }}>
-          <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: 5, color: t.amber }}>TANKERING</span>
-          <span style={{ fontSize: 10, letterSpacing: 2, color: t.dim }}>CJ4 • POH DATA</span>
+      {/* Header */}
+      <div style={{ maxWidth: 1100, margin: '0 auto', padding: '24px 20px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
+          <h1 style={{ fontSize: 22, fontWeight: 700, color: c.text }}>Fuel Tankering Calculator</h1>
+          <span style={{ fontSize: 13, color: c.muted }}>Citation CJ4</span>
         </div>
-        {ac && <span style={{ fontSize: 10, letterSpacing: 1.5, color: t.dim }}>{ac.dataSource}</span>}
+        <p style={{ fontSize: 13, color: c.muted, marginBottom: 20 }}>
+          Uses actual POH performance data with bilinear interpolation — not flat percentage estimates.
+        </p>
+
+        {/* Price bar */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 16, background: c.card,
+          border: `1px solid ${c.border}`, borderRadius: 10, padding: '10px 20px', marginBottom: 20, flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: 13, color: c.muted }}>Origin</span>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>${parseFloat(pOrig) || 0}/gal</span>
+          <span style={{ fontSize: 18, color: c.muted }}>→</span>
+          <span style={{ fontSize: 13, color: c.muted }}>Destination</span>
+          <span style={{ fontSize: 16, fontWeight: 600 }}>${parseFloat(pDest) || 0}/gal</span>
+          <span style={{
+            marginLeft: 'auto', fontSize: 15, fontWeight: 700,
+            color: priceDiff > 0 ? c.green : priceDiff < 0 ? c.red : c.muted,
+          }}>
+            {priceDiff >= 0 ? '+' : ''}{priceDiff.toFixed(2)}/gal difference
+          </span>
+          {overMTOW && <span style={{ color: c.red, fontWeight: 600, fontSize: 13 }}>Over MTOW</span>}
+        </div>
       </div>
 
-      {/* ═══ LIVE PRICE DIFF STRIP ═══ */}
-      <div style={{ background: priceDiff > 0 ? 'rgba(0,224,112,0.06)' : priceDiff < 0 ? 'rgba(255,64,96,0.06)' : t.surface, borderBottom: `1px solid ${t.border}`, padding: '6px 20px', display: 'flex', alignItems: 'center', gap: 16, fontFamily: mono, fontSize: 12 }}>
-        <span style={{ color: t.dim }}>ORIGIN</span>
-        <span style={{ color: t.text, fontSize: 14, fontWeight: 700 }}>${parseFloat(pOrig) || 0}</span>
-        <span style={{ color: priceDiff > 0 ? t.green : priceDiff < 0 ? t.red : t.dim, fontSize: 16 }}>→</span>
-        <span style={{ color: t.dim }}>DEST</span>
-        <span style={{ color: t.text, fontSize: 14, fontWeight: 700 }}>${parseFloat(pDest) || 0}</span>
-        <span style={{ color: t.dim, margin: '0 4px' }}>|</span>
-        <span style={{ color: priceDiff > 0 ? t.green : priceDiff < 0 ? t.red : t.dim, fontWeight: 700, fontSize: 14 }}>
-          {priceDiff >= 0 ? '+' : ''}{priceDiff.toFixed(2)}/gal
-        </span>
-        {overMTOW && <span style={{ color: t.red, fontWeight: 700, marginLeft: 'auto', fontSize: 11, letterSpacing: 1.5 }}>⚠ OVER MTOW</span>}
-      </div>
+      {/* Main layout */}
+      <div className="calc-layout" style={{
+        maxWidth: 1100, margin: '0 auto', padding: '0 20px 40px',
+        display: 'grid', gridTemplateColumns: '360px 1fr', gap: 20, alignItems: 'start',
+      }}>
 
-      {/* ═══ MAIN 2-COL LAYOUT ═══ */}
-      <div style={{ maxWidth: 1200, margin: '0 auto', padding: '16px 16px', display: 'grid', gridTemplateColumns: '340px 1fr', gap: 16, alignItems: 'start' }}
-        className="calc-layout">
+        {/* ─── LEFT: INPUTS ─── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-        {/* ═══ LEFT: INPUTS ═══ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-
-          {/* Aircraft row */}
-          <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: 14 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+          {/* Aircraft & Mode */}
+          <Card>
+            <CardHeader>Aircraft & Cruise Mode</CardHeader>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
               <div>
-                <Lbl>Aircraft</Lbl>
-                <select style={sel} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
+                <Label>Aircraft</Label>
+                <select style={selectStyle} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
                   {acList.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}
                 </select>
               </div>
               <div>
-                <Lbl>Altitude</Lbl>
-                <select style={sel} value={alt} onChange={e => setAlt(+e.target.value)}>
+                <Label>Altitude</Label>
+                <select style={selectStyle} value={alt} onChange={e => setAlt(+e.target.value)}>
                   {alts.map(a => <option key={a} value={a}>FL{a / 100}</option>)}
                 </select>
               </div>
             </div>
-            {/* Cruise mode toggle */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {(['hsc', 'lrc'] as CruiseMode[]).map(m => (
                 <button key={m} onClick={() => setMode(m)} style={{
-                  padding: '8px 0', borderRadius: 4, fontSize: 11, fontWeight: 700, letterSpacing: 2,
-                  textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.15s', border: 'none',
-                  background: mode === m ? (m === 'hsc' ? 'rgba(77,184,255,0.12)' : 'rgba(240,165,0,0.12)') : t.surface,
-                  color: mode === m ? (m === 'hsc' ? t.blue : t.amber) : t.dim,
-                  boxShadow: mode === m ? `inset 0 -2px 0 ${m === 'hsc' ? t.blue : t.amber}` : 'none',
+                  padding: '10px 0', borderRadius: 8, fontSize: 13, fontWeight: 600,
+                  cursor: 'pointer', transition: 'all 0.15s', border: `1.5px solid ${mode === m ? c.accent : c.border}`,
+                  background: mode === m ? 'rgba(59,130,246,0.1)' : 'transparent',
+                  color: mode === m ? c.accent : c.muted,
                 }}>
-                  {m === 'hsc' ? '⚡ HIGH SPEED' : '🏁 LONG RANGE'}
+                  {m === 'hsc' ? 'High Speed Cruise' : 'Long Range Cruise'}
                 </button>
               ))}
             </div>
-            <div style={{ marginTop: 6, fontSize: 10, color: t.dim, lineHeight: 1.4 }}>
+            <p style={{ marginTop: 8, fontSize: 12, color: c.muted, lineHeight: 1.5 }}>
               {mode === 'hsc'
-                ? 'HSC: Max cruise thrust. Fuel flow barely changes with weight — low tankering penalty.'
-                : 'LRC: Optimized for range. Fuel flow rises steeply with weight — tankering penalty is significant.'}
-            </div>
-          </div>
+                ? 'At HSC, fuel flow barely changes with weight — tankering penalty is minimal.'
+                : 'At LRC, fuel flow rises significantly with weight — tankering penalty can be substantial.'}
+            </p>
+          </Card>
 
-          {/* Trip & Weight */}
-          <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: 14 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {/* Trip */}
+          <Card>
+            <CardHeader>Trip & Weight</CardHeader>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
               <div>
-                <Lbl>Distance (NM)</Lbl>
-                <input style={{ ...inp, borderColor: errs.dist ? t.red : t.border }} type="number" value={dist} onChange={e => setDist(e.target.value)} />
+                <Label>Distance (NM)</Label>
+                <input style={{ ...inputStyle, borderColor: errs.dist ? c.red : c.border }} type="number" value={dist} onChange={e => setDist(e.target.value)} />
               </div>
               <div>
-                <Lbl tip="Aircraft weight at start of cruise, including passengers, bags, and trip fuel.">Cruise Weight (lb)</Lbl>
-                <input style={{ ...inp, borderColor: errs.weight ? t.red : t.border }} type="number" value={weight} onChange={e => setWeight(e.target.value)} />
+                <Label hint="Weight at start of cruise, including pax, bags, and fuel.">Cruise Weight (lb)</Label>
+                <input style={{ ...inputStyle, borderColor: errs.weight ? c.red : c.border }} type="number" value={weight} onChange={e => setWeight(e.target.value)} />
               </div>
             </div>
-            <div style={{ marginTop: 8 }}>
-              <Lbl tip={`Max tankerable: ${fmtN(maxTankGal, 0)} gal. Limited by MTOW and tank capacity.`}>
-                Tanker Amount (gal)
-              </Lbl>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input style={{ ...inp, flex: 1 }} type="number" value={tankerGal} onChange={e => setTankerGal(e.target.value)} />
-                <span style={{ fontFamily: mono, fontSize: 11, color: t.dim, whiteSpace: 'nowrap' }}>= {fmtN(tLb, 0)} lb</span>
-              </div>
-              {/* Tanker slider */}
-              <input type="range" min={0} max={Math.max(1, maxTankGal)} step={5} value={parseFloat(tankerGal) || 0}
-                onChange={e => setTankerGal(e.target.value)}
-                style={{ width: '100%', marginTop: 6, accentColor: t.amber, cursor: 'pointer' }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: t.dim, fontFamily: mono, marginTop: 2 }}>
-                <span>0 gal</span>
-                <span>{fmtN(maxTankGal, 0)} gal max</span>
-              </div>
+            <Label hint={`Max: ${fmt(maxTankGal, 0)} gal (limited by MTOW and tank capacity)`}>Tanker Amount (gal)</Label>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <input style={{ ...inputStyle, flex: 1 }} type="number" value={tankerGal} onChange={e => setTankerGal(e.target.value)} />
+              <span style={{ fontSize: 13, color: c.muted, whiteSpace: 'nowrap' }}>{fmt(tLb, 0)} lb</span>
             </div>
-          </div>
+            <input type="range" min={0} max={Math.max(1, maxTankGal)} step={5}
+              value={parseFloat(tankerGal) || 0} onChange={e => setTankerGal(e.target.value)}
+              style={{ width: '100%', marginTop: 8, accentColor: c.accent, cursor: 'pointer' }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: c.muted, marginTop: 3 }}>
+              <span>0 gal</span>
+              <span>{fmt(maxTankGal, 0)} gal max</span>
+            </div>
+          </Card>
 
-          {/* Prices */}
-          <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: 14 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {/* Fuel Prices */}
+          <Card>
+            <CardHeader>Fuel Prices</CardHeader>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div>
-                <Lbl>Origin ($/gal)</Lbl>
-                <input style={{ ...inp, borderColor: errs.pOrig ? t.red : t.border }} type="number" step="0.01" value={pOrig} onChange={e => setPOrig(e.target.value)} />
+                <Label>Origin ($/gal)</Label>
+                <input style={{ ...inputStyle, borderColor: errs.pOrig ? c.red : c.border }} type="number" step="0.01" value={pOrig} onChange={e => setPOrig(e.target.value)} />
               </div>
               <div>
-                <Lbl>Dest ($/gal)</Lbl>
-                <input style={{ ...inp, borderColor: errs.pDest ? t.red : t.border }} type="number" step="0.01" value={pDest} onChange={e => setPDest(e.target.value)} />
+                <Label>Destination ($/gal)</Label>
+                <input style={{ ...inputStyle, borderColor: errs.pDest ? c.red : c.border }} type="number" step="0.01" value={pDest} onChange={e => setPDest(e.target.value)} />
               </div>
             </div>
-          </div>
+          </Card>
 
           {/* Weather */}
-          <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: 14 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <Card>
+            <CardHeader>Weather</CardHeader>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div>
-                <Lbl tip="+kt = headwind, -kt = tailwind">Wind (kt)</Lbl>
-                <input style={inp} type="number" value={wind} onChange={e => setWind(e.target.value)} />
+                <Label hint="Positive = headwind, negative = tailwind">Wind Component (kt)</Label>
+                <input style={inputStyle} type="number" value={wind} onChange={e => setWind(e.target.value)} />
               </div>
               <div>
-                <Lbl tip={`ISA at FL${alt/100}: ${isaT.toFixed(1)}°C. Blank = ISA.`}>Temp (°C)</Lbl>
-                <input style={inp} type="number" value={temp} onChange={e => setTemp(e.target.value)} placeholder={`${isaT.toFixed(0)}°`} />
+                <Label hint={`ISA at FL${alt / 100}: ${isaT.toFixed(1)}°C. Leave blank for ISA.`}>Temperature (°C)</Label>
+                <input style={inputStyle} type="number" value={temp} onChange={e => setTemp(e.target.value)} placeholder={`ISA: ${isaT.toFixed(0)}°`} />
               </div>
             </div>
-          </div>
+          </Card>
 
           {/* Advanced */}
-          <Section title="Advanced">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <Collapsible title="Advanced Settings">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
               <div>
-                <Lbl>Fuel Density (lb/gal)</Lbl>
-                <input style={inp} type="number" step="0.01" value={density} onChange={e => setDensity(e.target.value)} />
+                <Label>Fuel Density (lb/gal)</Label>
+                <input style={inputStyle} type="number" step="0.01" value={density} onChange={e => setDensity(e.target.value)} />
               </div>
               <div>
-                <Lbl>Descent Dist (NM)</Lbl>
-                <input style={inp} type="number" value={descDist} onChange={e => setDescDist(e.target.value)} />
+                <Label>Descent Distance (NM)</Label>
+                <input style={inputStyle} type="number" value={descDist} onChange={e => setDescDist(e.target.value)} />
               </div>
             </div>
-            <div style={{ marginTop: 8 }}>
-              <Lbl>Departure Elev (ft)</Lbl>
-              <input style={inp} type="number" value={depElev} onChange={e => setDepElev(e.target.value)} />
-            </div>
-          </Section>
+            <Label>Departure Elevation (ft)</Label>
+            <input style={inputStyle} type="number" value={depElev} onChange={e => setDepElev(e.target.value)} />
+          </Collapsible>
 
-          {/* RUN */}
+          {/* Analyze button */}
           <button onClick={run} style={{
-            width: '100%', padding: '14px 0', borderRadius: 6, fontSize: 15, fontWeight: 700,
-            letterSpacing: 4, textTransform: 'uppercase', cursor: 'pointer', border: `2px solid ${t.green}`,
-            background: `linear-gradient(180deg, rgba(0,224,112,0.1), rgba(0,224,112,0.03))`,
-            color: t.green, fontFamily: sans, transition: 'all 0.15s',
+            width: '100%', padding: '14px 0', borderRadius: 10, fontSize: 16, fontWeight: 700,
+            cursor: 'pointer', border: 'none',
+            background: c.accent, color: '#fff', transition: 'all 0.15s',
           }}
-            onMouseEnter={e => (e.currentTarget.style.boxShadow = `0 0 30px rgba(0,224,112,0.25)`)}
-            onMouseLeave={e => (e.currentTarget.style.boxShadow = 'none')}>
-            ▶ ANALYZE
+            onMouseEnter={e => (e.currentTarget.style.opacity = '0.9')}
+            onMouseLeave={e => (e.currentTarget.style.opacity = '1')}>
+            Analyze Tankering
           </button>
 
           {/* Warnings */}
           {r && r.warnings.length > 0 && (
-            <div style={{ background: 'rgba(245,158,11,0.08)', border: `1px solid rgba(245,158,11,0.3)`, borderRadius: 6, padding: '10px 14px' }}>
+            <Card style={{ background: 'rgba(245,158,11,0.06)', borderColor: 'rgba(245,158,11,0.25)' }}>
               {r.warnings.map((w, i) => (
-                <div key={i} style={{ fontSize: 10, fontFamily: mono, color: t.amber, marginBottom: 2 }}>⚠ {w}</div>
+                <p key={i} style={{ fontSize: 13, color: c.amber, marginBottom: i < r.warnings.length - 1 ? 6 : 0 }}>{w}</p>
               ))}
-            </div>
+            </Card>
           )}
         </div>
 
-        {/* ═══ RIGHT: RESULTS ═══ */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* ─── RIGHT: RESULTS ─── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {!r ? (
-            /* Empty state */
-            <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: '60px 20px', textAlign: 'center' }}>
-              <div style={{ fontSize: 48, marginBottom: 12, opacity: 0.15 }}>⛽</div>
-              <div style={{ fontSize: 13, color: t.dim, letterSpacing: 2 }}>ENTER PARAMETERS AND HIT ANALYZE</div>
-            </div>
+            <Card style={{ padding: '80px 20px', textAlign: 'center' }}>
+              <p style={{ fontSize: 40, marginBottom: 12, opacity: 0.12 }}>⛽</p>
+              <p style={{ fontSize: 14, color: c.muted }}>Enter your parameters and click Analyze</p>
+            </Card>
           ) : (
             <>
-              {/* ═══ VERDICT ═══ */}
-              <div style={{
+              {/* Verdict */}
+              <Card style={{
+                borderColor: r.worthIt ? c.green : c.red,
                 background: r.worthIt
-                  ? `linear-gradient(135deg, rgba(0,224,112,0.08), rgba(0,224,112,0.02))`
-                  : `linear-gradient(135deg, rgba(255,64,96,0.08), rgba(255,64,96,0.02))`,
-                border: `2px solid ${r.worthIt ? t.green : t.red}`,
-                borderRadius: 8, padding: '20px 24px',
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12,
+                  ? 'rgba(34,197,94,0.06)'
+                  : 'rgba(239,68,68,0.06)',
               }}>
-                <div>
-                  <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: 4, color: r.worthIt ? t.green : t.red }}>
-                    {r.worthIt ? '✓ TANKER' : '✗ DO NOT TANKER'}
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+                  <div>
+                    <h2 style={{ fontSize: 22, fontWeight: 700, color: r.worthIt ? c.green : c.red, marginBottom: 4 }}>
+                      {r.worthIt ? 'Tanker — Save Money' : 'Do Not Tanker'}
+                    </h2>
+                    <p style={{ fontSize: 13, color: c.muted }}>
+                      {r.worthIt ? 'Price savings exceed the burn penalty.' : 'The burn penalty exceeds price savings.'}
+                    </p>
                   </div>
-                  <div style={{ fontSize: 11, letterSpacing: 1.5, color: r.worthIt ? 'rgba(0,224,112,0.6)' : 'rgba(255,64,96,0.6)', marginTop: 2 }}>
-                    {r.worthIt ? 'Price savings exceed burn penalty' : 'Burn penalty exceeds price savings'}
+                  <div style={{ fontSize: 36, fontWeight: 700, color: r.worthIt ? c.green : c.red }}>
+                    {r.netSavings < 0 ? '-' : '+'}${fmt(Math.abs(r.netSavings), 2)}
                   </div>
                 </div>
-                <div style={{ fontFamily: mono, fontSize: 36, fontWeight: 700, color: r.worthIt ? t.green : t.red }}>
-                  {r.netSavings < 0 ? '-' : ''}${fmtN(Math.abs(r.netSavings), 2)}
-                </div>
+              </Card>
+
+              {/* Key metrics */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+                {[
+                  { label: 'Gross Savings', value: `$${fmt(r.grossSavings, 2)}`, color: c.green },
+                  { label: 'Penalty Cost', value: `$${fmt(r.penaltyCost, 2)}`, color: c.red },
+                  { label: 'Penalty %', value: `${fmt(r.penaltyPct, 1)}%`, color: c.amber },
+                  { label: 'Break-Even Diff', value: `$${fmt(r.breakEvenPriceDiff, 2)}/gal`, color: c.sub },
+                ].map(m => (
+                  <Card key={m.label} style={{ textAlign: 'center', padding: 16 }}>
+                    <p style={{ fontSize: 12, color: c.muted, marginBottom: 6 }}>{m.label}</p>
+                    <p style={{ fontSize: 18, fontWeight: 700, color: m.color }}>{m.value}</p>
+                  </Card>
+                ))}
               </div>
 
-              {/* ═══ KEY METRICS ROW ═══ */}
-              <div style={{
-                background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6,
-                display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-              }}>
-                <Stat label="Gross Savings" value={`$${fmtN(r.grossSavings, 2)}`} color={t.green} />
-                <Stat label="Penalty Cost" value={`$${fmtN(r.penaltyCost, 2)}`} color={t.red} />
-                <Stat label="Penalty %" value={`${fmtN(r.penaltyPct, 1)}%`} color={t.amber} />
-                <Stat label="Break-Even" value={`$${fmtN(r.breakEvenPriceDiff, 2)}/gal`} color={t.sub} />
-              </div>
-
-              {/* ═══ FUEL FLOW COMPARISON ═══ */}
-              <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: 16 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 12, alignItems: 'center' }}>
+              {/* Fuel flow comparison */}
+              <Card>
+                <CardHeader>Fuel Flow Comparison</CardHeader>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 16, alignItems: 'center', marginBottom: 16 }}>
                   <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 9, letterSpacing: 1.5, color: t.dim, textTransform: 'uppercase', marginBottom: 4 }}>Normal Weight</div>
-                    <div style={{ fontFamily: mono, fontSize: 22, fontWeight: 700, color: t.sub }}>{fmtN(r.ffNormal, 0)}</div>
-                    <div style={{ fontFamily: mono, fontSize: 10, color: t.dim }}>lb/hr</div>
+                    <p style={{ fontSize: 12, color: c.muted, marginBottom: 4 }}>Normal Weight</p>
+                    <p style={{ fontSize: 26, fontWeight: 700, color: c.sub }}>{fmt(r.ffNormal, 0)}</p>
+                    <p style={{ fontSize: 12, color: c.muted }}>lb/hr</p>
+                  </div>
+                  <div style={{ textAlign: 'center', padding: '0 12px' }}>
+                    <p style={{ fontSize: 20, fontWeight: 700, color: r.ffDelta > 0 ? c.amber : c.green }}>
+                      {r.ffDelta >= 0 ? '+' : ''}{fmt(r.ffDelta, 1)}
+                    </p>
+                    <p style={{ fontSize: 11, color: c.muted }}>lb/hr difference</p>
                   </div>
                   <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontFamily: mono, fontSize: 16, fontWeight: 700, color: r.ffDelta > 0 ? t.amber : t.green }}>
-                      {r.ffDelta >= 0 ? '+' : ''}{fmtN(r.ffDelta, 1)}
-                    </div>
-                    <div style={{ fontSize: 9, color: t.dim }}>Δ lb/hr</div>
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 9, letterSpacing: 1.5, color: t.dim, textTransform: 'uppercase', marginBottom: 4 }}>Tankered Weight</div>
-                    <div style={{ fontFamily: mono, fontSize: 22, fontWeight: 700, color: t.text }}>{fmtN(r.ffHeavy, 0)}</div>
-                    <div style={{ fontFamily: mono, fontSize: 10, color: t.dim }}>lb/hr</div>
+                    <p style={{ fontSize: 12, color: c.muted, marginBottom: 4 }}>With Tankering</p>
+                    <p style={{ fontSize: 26, fontWeight: 700, color: c.text }}>{fmt(r.ffHeavy, 0)}</p>
+                    <p style={{ fontSize: 12, color: c.muted }}>lb/hr</p>
                   </div>
                 </div>
-                {/* Penalty bar */}
-                <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                  <div style={{ background: t.surface, borderRadius: 4, padding: '8px 12px', display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: 10, color: t.dim }}>Cruise penalty</span>
-                    <span style={{ fontFamily: mono, fontSize: 12, color: t.text }}>{fmtN(r.cruisePenalty_lb, 1)} lb</span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                  <div style={{ background: c.cardAlt, borderRadius: 8, padding: '10px 14px', display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, color: c.muted }}>Cruise penalty</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: c.text }}>{fmt(r.cruisePenalty_lb, 1)} lb</span>
                   </div>
-                  <div style={{ background: t.surface, borderRadius: 4, padding: '8px 12px', display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ fontSize: 10, color: t.dim }}>Climb penalty</span>
-                    <span style={{ fontFamily: mono, fontSize: 12, color: t.text }}>{fmtN(r.climbPenalty_lb, 1)} lb</span>
+                  <div style={{ background: c.cardAlt, borderRadius: 8, padding: '10px 14px', display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 13, color: c.muted }}>Climb penalty</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: c.text }}>{fmt(r.climbPenalty_lb, 1)} lb</span>
                   </div>
                 </div>
-              </div>
+              </Card>
 
-              {/* ═══ SENSITIVITY CHART ═══ */}
-              <div style={{ background: t.panel, border: `1px solid ${t.border}`, borderRadius: 6, padding: '12px 14px 8px' }}>
-                <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
-                  {([
-                    { k: 'tankerAmount' as const, l: 'AMOUNT' },
-                    { k: 'priceDiff' as const, l: 'PRICE' },
-                    { k: 'wind' as const, l: 'WIND' },
-                  ]).map(s => (
-                    <button key={s.k} onClick={() => setSensType(s.k)} style={{
-                      padding: '4px 10px', borderRadius: 3, fontSize: 9, fontWeight: 700,
-                      letterSpacing: 1.5, textTransform: 'uppercase', cursor: 'pointer', border: 'none',
-                      background: sensType === s.k ? 'rgba(240,165,0,0.12)' : 'transparent',
-                      color: sensType === s.k ? t.amber : t.dim,
-                    }}>{s.l}</button>
-                  ))}
+              {/* Sensitivity chart */}
+              <Card>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+                  <CardHeader>Sensitivity Analysis</CardHeader>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    {([
+                      { k: 'tankerAmount' as const, l: 'Amount' },
+                      { k: 'priceDiff' as const, l: 'Price Diff' },
+                      { k: 'wind' as const, l: 'Wind' },
+                    ]).map(s => (
+                      <button key={s.k} onClick={() => setSensType(s.k)} style={{
+                        padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+                        cursor: 'pointer', border: `1px solid ${sensType === s.k ? c.accent : c.border}`,
+                        background: sensType === s.k ? 'rgba(59,130,246,0.1)' : 'transparent',
+                        color: sensType === s.k ? c.accent : c.muted,
+                      }}>{s.l}</button>
+                    ))}
+                  </div>
                 </div>
-                <ResponsiveContainer width="100%" height={180}>
-                  <AreaChart data={sensData} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
-                    <defs>
-                      <linearGradient id="savGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={t.green} stopOpacity={0.2} />
-                        <stop offset="100%" stopColor={t.green} stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke={t.grid} />
-                    <XAxis dataKey="x" tick={{ fill: t.dim, fontSize: 9, fontFamily: mono }} axisLine={false} tickLine={false}
-                      tickFormatter={v => sensType === 'priceDiff' ? `$${v.toFixed(1)}` : sensType === 'wind' ? `${v}kt` : `${v.toFixed(0)}g`} />
-                    <YAxis tick={{ fill: t.dim, fontSize: 9, fontFamily: mono }} axisLine={false} tickLine={false}
-                      tickFormatter={v => fmtD(v)} />
-                    <RCTooltip content={<CTip />} />
-                    <ReferenceLine y={0} stroke={t.border} strokeDasharray="4 4" />
-                    <Area type="monotone" dataKey="netSavings" name="Net Savings" stroke={t.amber} strokeWidth={2} fill="url(#savGrad)" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
+                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                  <div style={{ width: '100%', maxWidth: 600 }}>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <AreaChart data={sensData} margin={{ top: 8, right: 16, left: 16, bottom: 8 }}>
+                        <defs>
+                          <linearGradient id="savGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%" stopColor={c.accent} stopOpacity={0.25} />
+                            <stop offset="100%" stopColor={c.accent} stopOpacity={0} />
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={c.border} />
+                        <XAxis dataKey="x" tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false}
+                          tickFormatter={v => sensType === 'priceDiff' ? `$${v.toFixed(1)}` : sensType === 'wind' ? `${v}kt` : `${v.toFixed(0)}g`} />
+                        <YAxis tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false}
+                          tickFormatter={v => `$${v.toFixed(0)}`} />
+                        <RCTooltip content={<ChartTooltip />} />
+                        <ReferenceLine y={0} stroke={c.muted} strokeDasharray="4 4" />
+                        <Area type="monotone" dataKey="netSavings" name="Net Savings" stroke={c.accent} strokeWidth={2} fill="url(#savGrad)" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              </Card>
 
-              {/* ═══ TRIP DETAILS (collapsed) ═══ */}
-              <Section title="Trip Details">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1 }}>
+              {/* Trip Details */}
+              <Collapsible title="Trip Details">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
                   {[
-                    ['Cruise NM', `${fmtN(r.effectiveCruiseNM, 0)} NM`],
-                    ['Cruise Time', `${fmtN(r.cruiseTime_hrs * 60, 0)} min`],
-                    ['KTAS', `${fmtN(r.cruiseKtas, 0)} kt`],
-                    ['Wind Factor', `×${fmtN(r.windCorrectionFactor, 3)}`],
-                    ['Climb Dist', `${fmtN(r.climbDistanceHeavy, 0)} NM`],
-                    ['Climb Fuel (normal)', `${fmtN(r.climbFuelNormal, 0)} lb`],
-                    ['Climb Fuel (heavy)', `${fmtN(r.climbFuelHeavy, 0)} lb`],
+                    ['Cruise Distance', `${fmt(r.effectiveCruiseNM, 0)} NM`],
+                    ['Cruise Time', `${fmt(r.cruiseTime_hrs * 60, 0)} min`],
+                    ['Cruise Speed', `${fmt(r.cruiseKtas, 0)} KTAS`],
+                    ['Wind Factor', `${fmt(r.windCorrectionFactor, 3)}x`],
+                    ['Climb Dist', `${fmt(r.climbDistanceHeavy, 0)} NM`],
+                    ['Climb Fuel (normal)', `${fmt(r.climbFuelNormal, 0)} lb`],
+                    ['Climb Fuel (heavy)', `${fmt(r.climbFuelHeavy, 0)} lb`],
                     ...(r.isaDeviation !== null ? [
-                      ['ISA Dev', `${r.isaDeviation >= 0 ? '+' : ''}${fmtN(r.isaDeviation, 1)}°C`],
-                      ['Temp Factor', `×${fmtN(r.isaTempCorrection, 4)}`],
+                      ['ISA Deviation', `${r.isaDeviation >= 0 ? '+' : ''}${fmt(r.isaDeviation, 1)}°C`],
+                      ['Temp Factor', `${fmt(r.isaTempCorrection, 4)}x`],
                     ] : []),
                   ].map(([k, v], i) => (
-                    <div key={i} style={{ background: i % 2 === 0 ? t.surface : 'transparent', padding: '6px 10px', display: 'flex', justifyContent: 'space-between', borderRadius: 3 }}>
-                      <span style={{ fontSize: 10, color: t.dim }}>{k}</span>
-                      <span style={{ fontFamily: mono, fontSize: 11, color: t.text }}>{v}</span>
+                    <div key={i} style={{
+                      background: i % 4 < 2 ? c.cardAlt : 'transparent',
+                      padding: '8px 12px', borderRadius: 6,
+                      display: 'flex', justifyContent: 'space-between',
+                    }}>
+                      <span style={{ fontSize: 13, color: c.muted }}>{k}</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: c.text }}>{v}</span>
                     </div>
                   ))}
                 </div>
-              </Section>
+              </Collapsible>
 
-              {/* ═══ RULE OF THUMB (collapsed) ═══ */}
+              {/* Rule of Thumb */}
               {r.ruleOfThumb && (
-                <Section title="vs Rule of Thumb (150 gal/hr)">
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                    <div style={{ background: t.surface, borderRadius: 4, padding: 12, textAlign: 'center' }}>
-                      <div style={{ fontSize: 9, letterSpacing: 1.5, color: t.dim, textTransform: 'uppercase', marginBottom: 4 }}>Flat Model</div>
-                      <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 700, color: t.sub }}>${fmtN(r.ruleOfThumb.netSavings, 2)}</div>
-                      <div style={{ fontSize: 9, color: t.dim, marginTop: 2 }}>Penalty: $0 (no weight sensitivity)</div>
+                <Collapsible title="Comparison: Rule of Thumb (150 gal/hr)">
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                    <div style={{ background: c.cardAlt, borderRadius: 8, padding: 16, textAlign: 'center' }}>
+                      <p style={{ fontSize: 12, color: c.muted, marginBottom: 6 }}>Flat Model</p>
+                      <p style={{ fontSize: 22, fontWeight: 700, color: c.sub }}>${fmt(r.ruleOfThumb.netSavings, 2)}</p>
+                      <p style={{ fontSize: 11, color: c.muted, marginTop: 4 }}>No weight sensitivity</p>
                     </div>
-                    <div style={{ background: t.surface, border: `1px solid ${t.amber}`, borderRadius: 4, padding: 12, textAlign: 'center' }}>
-                      <div style={{ fontSize: 9, letterSpacing: 1.5, color: t.amber, textTransform: 'uppercase', marginBottom: 4 }}>POH Data</div>
-                      <div style={{ fontFamily: mono, fontSize: 18, fontWeight: 700, color: t.amber }}>${fmtN(r.netSavings, 2)}</div>
-                      <div style={{ fontSize: 9, color: t.dim, marginTop: 2 }}>Penalty: ${fmtN(r.penaltyCost, 2)}</div>
+                    <div style={{ background: c.cardAlt, border: `1.5px solid ${c.accent}`, borderRadius: 8, padding: 16, textAlign: 'center' }}>
+                      <p style={{ fontSize: 12, color: c.accent, marginBottom: 6 }}>POH Data</p>
+                      <p style={{ fontSize: 22, fontWeight: 700, color: c.accent }}>${fmt(r.netSavings, 2)}</p>
+                      <p style={{ fontSize: 11, color: c.muted, marginTop: 4 }}>Penalty: ${fmt(r.penaltyCost, 2)}</p>
                     </div>
                   </div>
-                  <div style={{ fontSize: 10, color: t.dim, marginTop: 8, lineHeight: 1.5 }}>
-                    The 150 gal/hr rule uses a flat fuel flow that ignores weight — it always shows zero burn penalty.
+                  <p style={{ fontSize: 12, color: c.muted, lineHeight: 1.6 }}>
+                    The 150 gal/hr rule uses a flat fuel flow with no weight sensitivity — it always shows zero burn penalty.
                     {r.ffDelta > 5
-                      ? ' At LRC, actual fuel flow changes significantly with weight — the flat model overstates savings.'
-                      : ' At HSC, weight sensitivity is negligible, so both models converge.'}
-                  </div>
-                </Section>
+                      ? ' At LRC, actual fuel flow changes significantly with weight, so the flat model overstates savings.'
+                      : ' At HSC, weight sensitivity is minimal, so both models give similar results.'}
+                  </p>
+                </Collapsible>
               )}
 
-              {/* ═══ DATA BADGE ═══ */}
-              <div style={{ fontSize: 9, fontFamily: mono, color: t.dim, textAlign: 'center', padding: '8px 0', letterSpacing: 0.5 }}>
-                {ac?.dataSource} ({ac?.dataRevision}) • FOR PLANNING PURPOSES ONLY
-              </div>
+              {/* Footer */}
+              <p style={{ fontSize: 11, color: c.muted, textAlign: 'center', padding: '8px 0' }}>
+                {ac?.dataSource} ({ac?.dataRevision}) — For planning purposes only.
+              </p>
             </>
           )}
         </div>
       </div>
 
-      {/* ═══ RESPONSIVE ═══ */}
       <style>{`
-        @media (max-width: 800px) {
+        @media (max-width: 840px) {
           .calc-layout { grid-template-columns: 1fr !important; }
         }
       `}</style>
