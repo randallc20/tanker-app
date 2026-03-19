@@ -177,9 +177,54 @@ export default function Calculator() {
       <div style={{ maxWidth: 960, margin: '0 auto', padding: '28px 20px 48px' }}>
 
         <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4, color: c.text }}>Fuel Tankering Calculator</h1>
-        <p style={{ fontSize: 14, color: c.muted, marginBottom: 24 }}>
+        <p style={{ fontSize: 14, color: c.muted, marginBottom: 20 }}>
           Should you carry extra fuel from a cheaper airport? Pick a preset or type your own values.
         </p>
+
+        {/* ═══ HOW IT WORKS ═══ */}
+        <Collapsible title="How This Calculator Works" c={c} defaultOpen={false}>
+          <div style={{ fontSize: 14, lineHeight: 1.7, color: c.sub }}>
+            <p style={{ marginBottom: 12 }}>
+              <strong style={{ color: c.text }}>What is tankering?</strong> Fuel prices vary between airports.
+              If fuel is cheaper where you are now, you can fill up extra and carry it to your destination instead
+              of buying expensive fuel there. The tradeoff: extra weight means your engines burn more fuel en route.
+              This tool calculates whether the money you save on cheaper fuel exceeds the cost of that extra burn.
+            </p>
+
+            <p style={{ marginBottom: 12 }}>
+              <strong style={{ color: c.text }}>How we calculate it:</strong> We look up your aircraft's actual
+              fuel burn rate from the POH (Pilot's Operating Handbook) at two weights — your normal cruise weight
+              and your heavier weight with the extra fuel. The difference in fuel burn, multiplied by your flight
+              time, gives us the <strong style={{ color: c.text }}>burn penalty</strong> — how much extra fuel
+              you'll use carrying the weight. We then compare the cost of that penalty against the money you'd
+              save by buying cheaper fuel at your origin.
+            </p>
+
+            <p style={{ marginBottom: 12 }}>
+              <strong style={{ color: c.text }}>Why not just use a rule of thumb?</strong> Many operators estimate
+              a flat 3-5% burn penalty, but the real number depends heavily on your cruise mode. At{' '}
+              <strong style={{ color: c.text }}>High Speed Cruise</strong>, the engines run at max thrust regardless
+              of weight — a heavier plane just goes slightly slower but burns nearly the same fuel. The penalty
+              is almost zero. At <strong style={{ color: c.text }}>Long Range Cruise</strong>, the engines throttle
+              back to save fuel, so heavier weight means significantly more thrust and fuel burn. The penalty can
+              be substantial. A flat percentage misses this entirely.
+            </p>
+
+            <p style={{ marginBottom: 12 }}>
+              <strong style={{ color: c.text }}>What data do we use?</strong> All performance numbers come from
+              the Cessna CJ4 Flight Planning Guide (September 2012). The tool has fuel burn tables at 6 different
+              weights and 16 altitudes for both HSC and LRC modes. Your exact weight and altitude are interpolated
+              between these table values for a smooth, accurate estimate. Wind and temperature corrections are
+              also applied from POH tables.
+            </p>
+
+            <p style={{ color: c.accent }}>
+              This tool is for planning purposes only. Always verify with your current approved AFM/POH data.
+            </p>
+          </div>
+        </Collapsible>
+
+        <div style={{ height: 16 }} />
 
         {/* ═══ INPUTS ═══ */}
         <div style={{ background: c.card, border: `1px solid ${c.border}`, borderRadius: 12, padding: 24, marginBottom: 24 }}>
