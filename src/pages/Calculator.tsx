@@ -1,7 +1,8 @@
 /**
  * Calculator — CJ4 Fuel Tankering Analysis
  *
- * Every input is a dropdown. Results auto-calculate on change.
+ * Combo inputs: dropdown presets you can click OR type custom values.
+ * Results auto-calculate on every change.
  * Data from Cessna CJ4 Flight Planning Guide with bilinear interpolation.
  */
 
@@ -34,26 +35,58 @@ const c = {
 const fmt = (n: number, d = 0) =>
   n.toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d })
 
-const sel: React.CSSProperties = {
+const baseInput: React.CSSProperties = {
   width: '100%', background: c.input, border: `1px solid ${c.border}`, borderRadius: 8,
   padding: '10px 12px', fontSize: 14, color: c.text, outline: 'none',
-  appearance: 'none', paddingRight: 28, cursor: 'pointer',
 }
+const selectStyle: React.CSSProperties = { ...baseInput, appearance: 'none', paddingRight: 28, cursor: 'pointer' }
 
-/* ─── DROPDOWN OPTIONS ──────────────────────────────────────────────────── */
-const distanceOptions = [100, 150, 200, 250, 300, 400, 500, 600, 750, 1000, 1250, 1500]
-const weightOptions = [12000, 13000, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17110]
-const tankerOptions = [0, 25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 700, 800]
-const priceOptions = (() => {
+/* ─── PRESET OPTIONS ────────────────────────────────────────────────────── */
+const distPresets = [100, 150, 200, 250, 300, 400, 500, 600, 750, 1000, 1250, 1500]
+const weightPresets = [12000, 13000, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17110]
+const tankerPresets = [0, 25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 700, 800]
+const pricePresets = (() => {
   const p: number[] = []
-  for (let v = 3.0; v <= 12.0; v += 0.25) p.push(Math.round(v * 100) / 100)
+  for (let v = 3.0; v <= 12.0; v += 0.50) p.push(Math.round(v * 100) / 100)
   return p
 })()
-const windOptions = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
-const tempOptions = ['ISA', '-20', '-15', '-10', '-5', '0', '+5', '+10', '+15', '+20']
-const densityOptions = [6.5, 6.6, 6.7, 6.75, 6.8, 6.9, 7.0]
+const windPresets = [-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
+const densityPresets = [6.5, 6.6, 6.7, 6.75, 6.8, 6.9, 7.0]
 
-/* ─── COMPONENTS ────────────────────────────────────────────────────────── */
+/* ─── COMBO INPUT: dropdown presets + free typing ───────────────────────── */
+function ComboField({ label, id, value, onChange, presets, suffix, step }: {
+  label: string; id: string; value: string;
+  onChange: (v: string) => void; presets: (string | number)[];
+  suffix?: string; step?: string
+}) {
+  return (
+    <div>
+      <label htmlFor={id} style={{ display: 'block', marginBottom: 6, fontSize: 13, fontWeight: 500, color: c.sub }}>
+        {label}
+      </label>
+      <div style={{ position: 'relative' }}>
+        <input
+          id={id}
+          list={`${id}-list`}
+          type="text"
+          inputMode="decimal"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          style={baseInput}
+          autoComplete="off"
+        />
+        <datalist id={`${id}-list`}>
+          {presets.map(p => (
+            <option key={p} value={String(p)}>
+              {suffix ? `${p} ${suffix}` : String(p)}
+            </option>
+          ))}
+        </datalist>
+      </div>
+    </div>
+  )
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
@@ -103,53 +136,61 @@ export default function Calculator() {
   const [aircraftId, setAircraftId] = useState('cj4_525c')
   const [mode, setMode] = useState<CruiseMode>('hsc')
   const [alt, setAlt] = useState(39000)
-  const [dist, setDist] = useState(500)
-  const [weight, setWeight] = useState(15000)
-  const [tankerGal, setTankerGal] = useState(100)
-  const [wind, setWind] = useState(0)
+  const [dist, setDist] = useState('500')
+  const [weight, setWeight] = useState('15000')
+  const [tankerGal, setTankerGal] = useState('100')
+  const [wind, setWind] = useState('0')
   const [tempSel, setTempSel] = useState('ISA')
-  const [pOrig, setPOrig] = useState(5.0)
-  const [pDest, setPDest] = useState(7.0)
-  const [density, setDensity] = useState(6.7)
+  const [pOrig, setPOrig] = useState('5.00')
+  const [pDest, setPDest] = useState('7.00')
+  const [density, setDensity] = useState('6.7')
   const [sensType, setSensType] = useState<'priceDiff' | 'wind' | 'tankerAmount'>('tankerAmount')
 
   const ac = getAircraft(aircraftId)
-  const tLb = tankerGal * density
+  const fd = parseFloat(density) || 6.7
+  const distN = parseFloat(dist) || 0
+  const weightN = parseFloat(weight) || 0
+  const tankerN = parseFloat(tankerGal) || 0
+  const windN = parseFloat(wind) || 0
+  const origN = parseFloat(pOrig) || 0
+  const destN = parseFloat(pDest) || 0
+  const tLb = tankerN * fd
+
   const alts = ac ? (mode === 'hsc' ? ac.hsc : ac.lrc).altitudes.filter(a => a >= 21000) : []
-  const maxTankGal = ac ? Math.min(ac.weights.mtow - weight, ac.weights.maxFuel_lb) / density : 0
-  const priceDiff = pDest - pOrig
-  const overMTOW = ac ? (weight + tLb) > ac.weights.mtow : false
+  const maxTankGal = ac ? Math.min(ac.weights.mtow - weightN, ac.weights.maxFuel_lb) / fd : 0
+  const priceDiff = destN - origN
+  const overMTOW = ac ? (weightN + tLb) > ac.weights.mtow : false
   const isaT = isaTemperature(alt)
   const forecastTemp = tempSel === 'ISA' ? null : isaT + parseFloat(tempSel)
 
   // Auto-calculate on every change
   const result: TankeringResult | null = useMemo(() => {
-    if (!dist || !weight || !pOrig || !pDest) return null
+    if (!distN || !weightN || !origN || !destN) return null
     try {
       return calculateTankering({
         aircraftId, cruiseMode: mode, cruiseAltitude: alt,
-        tripDistance: dist, plannedCruiseWeight: weight,
-        tankerAmount_lb: tLb, windComponent: wind,
+        tripDistance: distN, plannedCruiseWeight: weightN,
+        tankerAmount_lb: tLb, windComponent: windN,
         forecastTemp_c: forecastTemp,
         departureElevation: 0,
-        originPrice: pOrig, destPrice: pDest,
-        fuelDensity: density, descentDistance: 50,
+        originPrice: origN, destPrice: destN,
+        fuelDensity: fd, descentDistance: 50,
       })
     } catch { return null }
-  }, [aircraftId, mode, alt, dist, weight, tLb, wind, forecastTemp, pOrig, pDest, density])
+  }, [aircraftId, mode, alt, distN, weightN, tLb, windN, forecastTemp, origN, destN, fd])
 
   const sensData = useMemo(() => {
     if (!result) return []
     return sensitivitySweep({
       aircraftId, cruiseMode: mode, cruiseAltitude: alt,
-      tripDistance: dist, plannedCruiseWeight: weight,
-      tankerAmount_lb: tLb, windComponent: wind,
+      tripDistance: distN, plannedCruiseWeight: weightN,
+      tankerAmount_lb: tLb, windComponent: windN,
       forecastTemp_c: forecastTemp,
       departureElevation: 0,
-      originPrice: pOrig, destPrice: pDest,
-      fuelDensity: density, descentDistance: 50,
+      originPrice: origN, destPrice: destN,
+      fuelDensity: fd, descentDistance: 50,
     }, sensType, 40)
-  }, [result, sensType, aircraftId, mode, alt, dist, weight, tLb, wind, forecastTemp, pOrig, pDest, density])
+  }, [result, sensType, aircraftId, mode, alt, distN, weightN, tLb, windN, forecastTemp, origN, destN, fd])
 
   const r = result
 
@@ -160,7 +201,7 @@ export default function Calculator() {
         {/* Header */}
         <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 4 }}>Fuel Tankering Calculator</h1>
         <p style={{ fontSize: 14, color: c.muted, marginBottom: 24 }}>
-          Should you carry extra fuel from a cheaper airport? Pick your flight details below.
+          Should you carry extra fuel from a cheaper airport? Pick a preset or type your own values.
         </p>
 
         {/* ═══ ALL INPUTS ═══ */}
@@ -172,17 +213,17 @@ export default function Calculator() {
           {/* Row 1: Aircraft, Altitude, Cruise Mode */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
             <Field label="Aircraft">
-              <select style={sel} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
+              <select style={selectStyle} value={aircraftId} onChange={e => setAircraftId(e.target.value)}>
                 {acList.map(a => <option key={a.id} value={a.id}>{a.displayName}</option>)}
               </select>
             </Field>
             <Field label="Cruise Altitude">
-              <select style={sel} value={alt} onChange={e => setAlt(+e.target.value)}>
+              <select style={selectStyle} value={alt} onChange={e => setAlt(+e.target.value)}>
                 {alts.map(a => <option key={a} value={a}>FL{a / 100} ({a.toLocaleString()} ft)</option>)}
               </select>
             </Field>
             <Field label="Cruise Mode">
-              <select style={sel} value={mode} onChange={e => setMode(e.target.value as CruiseMode)}>
+              <select style={selectStyle} value={mode} onChange={e => setMode(e.target.value as CruiseMode)}>
                 <option value="hsc">High Speed Cruise (HSC)</option>
                 <option value="lrc">Long Range Cruise (LRC)</option>
               </select>
@@ -191,74 +232,51 @@ export default function Calculator() {
 
           {/* Row 2: Distance, Weight, Tanker Amount */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <Field label="Trip Distance">
-              <select style={sel} value={dist} onChange={e => setDist(+e.target.value)}>
-                {distanceOptions.map(d => <option key={d} value={d}>{d} NM</option>)}
-              </select>
-            </Field>
-            <Field label="Cruise Weight">
-              <select style={sel} value={weight} onChange={e => setWeight(+e.target.value)}>
-                {weightOptions.map(w => <option key={w} value={w}>{w.toLocaleString()} lb</option>)}
-              </select>
-            </Field>
-            <Field label="Extra Fuel to Carry">
-              <select style={sel} value={tankerGal} onChange={e => setTankerGal(+e.target.value)}>
-                {tankerOptions.filter(g => g <= maxTankGal + 5 || g === 0).map(g => (
-                  <option key={g} value={g}>{g} gal ({fmt(g * density, 0)} lb)</option>
-                ))}
-              </select>
-            </Field>
+            <ComboField label="Trip Distance (NM)" id="dist" value={dist} onChange={setDist}
+              presets={distPresets} suffix="NM" />
+            <ComboField label="Cruise Weight (lb)" id="weight" value={weight} onChange={setWeight}
+              presets={weightPresets} suffix="lb" />
+            <div>
+              <ComboField label="Extra Fuel to Carry (gal)" id="tanker" value={tankerGal} onChange={setTankerGal}
+                presets={tankerPresets.filter(g => g <= maxTankGal + 5 || g === 0)} suffix="gal" />
+              <div style={{ fontSize: 11, color: c.muted, marginTop: 4 }}>
+                = {fmt(tLb, 0)} lb &middot; max {fmt(maxTankGal, 0)} gal
+              </div>
+            </div>
           </div>
 
           {/* Row 3: Origin Price, Dest Price */}
           <div className="grid-2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-            <Field label="Fuel Price at Origin">
-              <select style={sel} value={pOrig} onChange={e => setPOrig(+e.target.value)}>
-                {priceOptions.map(p => <option key={p} value={p}>${p.toFixed(2)}/gal</option>)}
-              </select>
-            </Field>
-            <Field label="Fuel Price at Destination">
-              <select style={sel} value={pDest} onChange={e => setPDest(+e.target.value)}>
-                {priceOptions.map(p => <option key={p} value={p}>${p.toFixed(2)}/gal</option>)}
-              </select>
-            </Field>
+            <ComboField label="Fuel Price at Origin ($/gal)" id="porig" value={pOrig} onChange={setPOrig}
+              presets={pricePresets} step="0.01" />
+            <ComboField label="Fuel Price at Destination ($/gal)" id="pdest" value={pDest} onChange={setPDest}
+              presets={pricePresets} step="0.01" />
           </div>
 
           {/* Row 4: Wind, Temp, Density */}
           <div className="grid-3" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
-            <Field label="Wind Component">
-              <select style={sel} value={wind} onChange={e => setWind(+e.target.value)}>
-                {windOptions.map(w => (
-                  <option key={w} value={w}>
-                    {w === 0 ? 'No wind' : w > 0 ? `${w} kt headwind` : `${Math.abs(w)} kt tailwind`}
-                  </option>
-                ))}
-              </select>
-            </Field>
+            <ComboField label="Wind Component (kt)" id="wind" value={wind} onChange={setWind}
+              presets={windPresets} suffix="kt" />
             <Field label="Temperature">
-              <select style={sel} value={tempSel} onChange={e => setTempSel(e.target.value)}>
-                {tempOptions.map(t => (
-                  <option key={t} value={t}>
-                    {t === 'ISA' ? `ISA (standard: ${isaT.toFixed(0)}°C)` : `ISA ${t}°C`}
-                  </option>
+              <select style={selectStyle} value={tempSel} onChange={e => setTempSel(e.target.value)}>
+                <option value="ISA">ISA (standard: {isaT.toFixed(0)}°C)</option>
+                {['-20', '-15', '-10', '-5', '+5', '+10', '+15', '+20'].map(t => (
+                  <option key={t} value={t}>ISA {t}°C</option>
                 ))}
               </select>
             </Field>
-            <Field label="Fuel Density">
-              <select style={sel} value={density} onChange={e => setDensity(+e.target.value)}>
-                {densityOptions.map(d => <option key={d} value={d}>{d} lb/gal</option>)}
-              </select>
-            </Field>
+            <ComboField label="Fuel Density (lb/gal)" id="density" value={density} onChange={setDensity}
+              presets={densityPresets} suffix="lb/gal" />
           </div>
         </div>
 
-        {/* ═══ LIVE SUMMARY BAR ═══ */}
+        {/* ═══ SUMMARY BAR ═══ */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 24,
           marginBottom: 24, flexWrap: 'wrap', fontSize: 14, color: c.sub,
         }}>
           <span>
-            Carrying <strong style={{ color: c.text }}>{tankerGal} gal</strong> extra
+            Carrying <strong style={{ color: c.text }}>{tankerN} gal</strong> ({fmt(tLb, 0)} lb) extra
           </span>
           <span>
             Price diff: <strong style={{ color: priceDiff > 0 ? c.green : priceDiff < 0 ? c.red : c.muted }}>
