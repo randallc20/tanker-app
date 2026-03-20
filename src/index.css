@@ -1,18 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;500;600;700&display=swap');
-@import "tailwindcss";
-
-/* ─── Base ──────────────────────────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-body {
-  background: #0c0f16;
-  color: #dde3f0;
-  font-family: 'Barlow Condensed', ui-sans-serif, system-ui, sans-serif;
-}
-
 /* Number input spinner removal */
 input[type=number]::-webkit-inner-spin-button,
 input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=number] { -moz-appearance: textfield; }
-
-input:focus, select:focus { outline: none; border-color: #3b82f6 !important; }
